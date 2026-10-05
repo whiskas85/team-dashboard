@@ -1,45 +1,45 @@
 name: CI & deploy
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-  workflow_dispatch:
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.push:
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.  branches: [main]
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.pull_request:
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.workflow_dispatch:
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - run: npm test
-      - run: python3 -m py_compile agent/zdt-agent.py
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.test:
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.  runs-on: ubuntu-latest
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.  steps:
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.    - uses: actions/checkout@v4
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.    - uses: actions/setup-node@v4
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.      with:
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.        node-version: 22
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.    - run: npm test
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.    - run: python3 -m py_compile agent/zdt-agent.py
 
-  # Deploys to the host behind console.zerodarkteam.it over SSH.
-  # Required repository secrets: DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY (and optionally DEPLOY_PATH).
-  # On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.
-  deploy:
-    needs: test
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    env:
-      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-    steps:
-      - name: Skip when deploy secrets are missing
-        if: env.DEPLOY_HOST == ''
-        run: echo "::notice::DEPLOY_HOST non configurato, deploy saltato"
-      - uses: actions/checkout@v4
-        if: env.DEPLOY_HOST != ''
-      - name: Sync & restart
-        if: env.DEPLOY_HOST != ''
-        env:
-          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          USER: ${{ secrets.DEPLOY_USER }}
-          DIR: ${{ secrets.DEPLOY_PATH || '/opt/zerodark-console' }}
-        run: |
-          mkdir -p ~/.ssh && echo "$SSH_KEY" > ~/.ssh/id && chmod 600 ~/.ssh/id
-          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
-          rsync -az --delete --exclude .git --exclude deploy/.env -e "ssh -i ~/.ssh/id" ./ "$USER@$DEPLOY_HOST:$DIR/"
-          ssh -i ~/.ssh/id "$USER@$DEPLOY_HOST" "cd $DIR/deploy && test -f .env && docker compose up -d --build && docker image prune -f"
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.# Deploys to the host behind console.zerodarkteam.it over SSH.
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.# Required repository secrets: DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY (and optionally DEPLOY_PATH).
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.# On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.deploy:
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.  needs: test
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.  if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.  runs-on: ubuntu-latest
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.  env:
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.    DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.  steps:
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.    - name: Skip when deploy secrets are missing
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.      if: env.DEPLOY_HOST == ''
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.      run: echo "::notice::DEPLOY_HOST non configurato, deploy saltato"
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.    - uses: actions/checkout@v4
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.      if: env.DEPLOY_HOST != ''
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.    - name: Sync & restart
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.      if: env.DEPLOY_HOST != ''
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.      env:
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.        SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.        USER: ${{ secrets.DEPLOY_USER }}
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.        DIR: ${{ secrets.DEPLOY_PATH || '/opt/zerodark-console' }}
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.      run: |
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.        mkdir -p ~/.ssh && echo "$SSH_KEY" > ~/.ssh/id && chmod 600 ~/.ssh/id
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.        ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.        rsync -az --delete --exclude .git --exclude deploy/.env -e "ssh -i ~/.ssh/id" ./ "$USER@$DEPLOY_HOST:$DIR/"
+ On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.        ssh -i ~/.ssh/id "$USER@$DEPLOY_HOST" "cd $DIR/deploy && bash setup.sh && docker image prune -f"

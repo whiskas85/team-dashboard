@@ -1,5 +1,6 @@
 # Production stack for console.zerodarkteam.it: the console + Caddy (automatic HTTPS via Let's Encrypt).
 #   cp .env.example .env && edit it, then: docker compose up -d --build
+name: zerodark-console
 services:
   console:
     build: ..

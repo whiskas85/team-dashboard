@@ -40,16 +40,20 @@ npm test
 
 ## Pubblicazione su console.zerodarkteam.it
 
-1. **DNS**: record `A` `console.zerodarkteam.it` → IP del server che ospita la console.
-2. Sul server (Docker + compose plugin):
+1. **DNS**: record `A` `console.zerodarkteam.it` → IP del server.
+2. Copia il codice sul server (es. in `/opt/zerodark-console`) ed esegui come root:
    ```bash
-   git clone <repo> /opt/zerodark-console && cd /opt/zerodark-console/deploy
-   cp .env.example .env   # imposta ADMIN_PASSWORD ed EXPORT_TOKEN
-   docker compose up -d --build
+   cd /opt/zerodark-console/deploy && bash setup.sh
    ```
-   Caddy ottiene in automatico il certificato HTTPS. Porte 80 e 443 aperte.
+   Lo script è idempotente: installa Docker se manca, crea `.env` con password e token casuali, e sceglie da solo la modalità:
+   - **porte 80/443 libere** → console + Caddy con HTTPS automatico;
+   - **nginx o Apache già attivi** (es. il sito principale sullo stesso server) → console su `127.0.0.1:8088`,
+     virtual host aggiunto al web server esistente e certificato Let's Encrypt con certbot;
+   - **Plesk o altro** → console su `127.0.0.1:8088` e istruzioni per il proxy.
+
+   Variabili opzionali: `DOMAIN`, `CONSOLE_PORT`, `EMAIL` (per Let's Encrypt).
 3. **Deploy automatico (opzionale)**: il workflow `.github/workflows/deploy.yml` esegue i test e, a ogni push su `main`,
-   sincronizza e riavvia via SSH se sono presenti i secret `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY` (opz. `DEPLOY_PATH`, default `/opt/zerodark-console`).
+   sincronizza il codice via SSH e rilancia `setup.sh`, se sono presenti i secret `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY` (opz. `DEPLOY_PATH`, default `/opt/zerodark-console`).
 
 Senza Docker: `ADMIN_PASSWORD=... PUBLIC_URL=https://console.zerodarkteam.it npm start` dietro un reverse proxy HTTPS.
 
@@ -131,7 +135,7 @@ server/db.js          schema SQLite + retention rolling
 server/analytics.js   capacità, trend, motore delle combinazioni
 server/public/        dashboard (HTML/CSS/JS vanilla, grafici SVG)
 agent/                agent Python, installer, hook e template di esempio
-deploy/               docker compose + Caddy per console.zerodarkteam.it
+deploy/               setup.sh, docker compose (Caddy o dietro nginx/Apache)
 scripts/seed-demo.js  dati demo
 test/                 test (node --test)
 ```

@@ -1,0 +1,17 @@
+# Console only, bound to localhost: used when an existing nginx/Apache already serves ports 80/443
+# (setup.sh picks this automatically). The host web server proxies DOMAIN -> 127.0.0.1:CONSOLE_PORT.
+name: zerodark-console
+services:
+  console:
+    build: ..
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PUBLIC_URL: https://${DOMAIN:-console.zerodarkteam.it}
+    volumes:
+      - console-data:/data
+    ports:
+      - "127.0.0.1:${CONSOLE_PORT:-8088}:8080"
+
+volumes:
+  console-data:
