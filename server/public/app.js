@@ -1,0 +1,522 @@
+/* global lineChart, fmt */
+'use strict';
+
+const $app = document.getElementById('app');
+const state = { me: null, range: '24h', days: 30, headroom: 80, n: 5, selectedApp: null, timer: null };
+const C = { s1: 'var(--s1)', s2: 'var(--s2)', s3: 'var(--s3)', s4: 'var(--s4)' };
+
+// ---------------------------------------------------------------------------
+// Utils
+// ---------------------------------------------------------------------------
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    method: opts.method || 'GET',
+    headers: opts.body ? { 'Content-Type': 'application/json' } : {},
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+    credentials: 'same-origin',
+  });
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 401 && !path.startsWith('/api/login')) {
+    state.me = { authenticated: false };
+    renderLogin();
+    throw new Error('Sessione scaduta');
+  }
+  if (!res.ok) throw new Error(data.error || `Errore ${res.status}`);
+  return data;
+}
+
+function ago(ts) {
+  if (!ts) return 'mai';
+  const s = Math.floor(Date.now() / 1000) - ts;
+  if (s < 60) return `${s}s fa`;
+  if (s < 3600) return `${Math.floor(s / 60)} min fa`;
+  if (s < 86400) return `${Math.floor(s / 3600)} h fa`;
+  return `${Math.floor(s / 86400)} g fa`;
+}
+
+const STATUS_LABEL = {
+  ok: 'OK', info: 'Info', warning: 'Attenzione', critical: 'Critico', offline: 'Offline', online: 'Online',
+  active: 'Attiva', pending: 'In coda', provisioning: 'In creazione', error: 'Errore', removing: 'In rimozione',
+  queued: 'In coda', sent: 'Inviato', done: 'Completato', failed: 'Fallito',
+};
+const badge = (st, label) => `<span class="badge st-${esc(st)}"><i class="dot"></i>${esc(label || STATUS_LABEL[st] || st)}</span>`;
+
+function meter(label, value, max, format, opts = {}) {
+  const pct = max ? Math.max(0, Math.min(100, (value / max) * 100)) : 0;
+  const cls = pct >= (opts.crit ?? 90) ? 'crit' : pct >= (opts.warn ?? 75) ? 'warn' : '';
+  const right = value == null ? '–' : `<b>${format(value)}</b>${max && !opts.hideMax ? ` / ${format(max)}` : ''}`;
+  const mark = opts.mark != null ? `<i class="mark" style="left:${opts.mark}%"></i>` : '';
+  return `<div><div class="meter-label"><span>${esc(label)}</span><span class="num">${right}</span></div>
+    <div class="meter ${cls}" role="meter" aria-label="${esc(label)}" aria-valuenow="${Math.round(pct)}" aria-valuemin="0" aria-valuemax="100"><span style="width:${pct}%"></span>${mark}</div></div>`;
+}
+
+function modal(html, onMount) {
+  const bg = document.createElement('div');
+  bg.className = 'modal-bg';
+  bg.innerHTML = `<div class="modal" role="dialog" aria-modal="true">${html}</div>`;
+  const close = () => bg.remove();
+  bg.addEventListener('click', (e) => e.target === bg && close());
+  bg.addEventListener('keydown', (e) => e.key === 'Escape' && close());
+  document.body.appendChild(bg);
+  bg.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', close));
+  const first = bg.querySelector('input, select, button');
+  if (first) first.focus();
+  onMount && onMount(bg.querySelector('.modal'), close);
+  return close;
+}
+
+function shell(active, content) {
+  $app.innerHTML = `
+    <header class="topbar">
+      <a class="brand" href="#/"><span class="logo">Z</span><span>ZeroDark Console</span></a>
+      <nav class="nav">
+        <a href="#/" class="${active === 'servers' ? 'active' : ''}">Server</a>
+        <a href="#/analysis" class="${active === 'analysis' ? 'active' : ''}">Capacità & combinazioni</a>
+      </nav>
+      <div class="spacer"></div>
+      <button class="small" id="theme" title="Tema chiaro/scuro" aria-label="Cambia tema">◐</button>
+      <button class="small" id="logout">Esci</button>
+    </header>
+    <main id="main">${content}</main>`;
+  document.getElementById('logout').onclick = async () => {
+    await api('/api/logout', { method: 'POST' }).catch(() => {});
+    state.me = { authenticated: false };
+    renderLogin();
+  };
+  document.getElementById('theme').onclick = () => {
+    const cur = document.documentElement.dataset.theme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    const next = cur === 'dark' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = next;
+    try { localStorage.setItem('zdt-theme', next); } catch { /* ignore */ }
+    route();
+  };
+  return document.getElementById('main');
+}
+
+function setRefresh(fn, ms = 60000) {
+  clearInterval(state.timer);
+  state.timer = fn ? setInterval(() => document.visibilityState === 'visible' && fn(), ms) : null;
+}
+
+// ---------------------------------------------------------------------------
+// Login
+// ---------------------------------------------------------------------------
+function renderLogin() {
+  setRefresh(null);
+  $app.innerHTML = `
+    <div class="login"><form class="card" id="login">
+      <div class="brand" style="margin-bottom:18px"><span class="logo">Z</span><span>ZeroDark Console</span></div>
+      <h1>Accedi</h1><p class="muted" style="margin:4px 0 18px">Monitoraggio server e capacità</p>
+      <div class="field"><label for="pw">Password</label><input id="pw" type="password" autocomplete="current-password" required></div>
+      <button class="primary" style="width:100%;justify-content:center">Entra</button>
+      <div class="err" id="err"></div>
+    </form></div>`;
+  document.getElementById('pw').focus();
+  document.getElementById('login').onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await api('/api/login', { method: 'POST', body: { password: document.getElementById('pw').value } });
+      state.me = await api('/api/me');
+      route();
+    } catch (err) {
+      document.getElementById('err').textContent = err.message;
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Overview
+// ---------------------------------------------------------------------------
+const VERDICT = {
+  ok: ['✓', 'Distribuzione adeguata'],
+  optimize: ['↻', 'Ottimizzazione possibile'],
+  rebalance: ['⚠', 'Ribilanciamento consigliato'],
+  expand: ['⬆', 'Serve allargare il servizio'],
+  no_data: ['…', 'In attesa di dati'],
+};
+
+async function renderOverview() {
+  const main = shell('servers', '<div class="loading">Caricamento…</div>');
+  const load = async () => {
+    const [servers, analysis] = await Promise.all([api('/api/servers'), api('/api/analysis?days=7&n=1').catch(() => null)]);
+    const statusOf = Object.fromEntries((analysis?.servers || []).map((s) => [s.id, s]));
+    const v = analysis && VERDICT[analysis.fleet.verdict];
+    main.innerHTML = `
+      <div class="page-head">
+        <div><h1>Server</h1><p>${servers.length} server monitorati · aggiornamento automatico ogni minuto</p></div>
+        <button class="primary" id="add">+ Aggiungi server</button>
+      </div>
+      ${v ? `<div class="banner"><div class="icon" aria-hidden="true">${v[0]}</div><div><b>${v[1]}</b> <span class="muted">(ultimi 7 giorni)</span>
+        <p>${analysis.fleet.advice.map(esc).join(' ')} <a href="#/analysis">Vedi analisi →</a></p></div></div>` : ''}
+      ${servers.length ? `<div class="grid cards">${servers.map((s) => serverCard(s, statusOf[s.id])).join('')}</div>`
+        : `<div class="card empty-state"><h2>Nessun server</h2><p>Aggiungi il primo server e installa l'agent con un solo comando.</p><button class="primary" id="add2">+ Aggiungi server</button></div>`}`;
+    main.querySelectorAll('[data-server]').forEach((c) => {
+      c.onclick = () => (location.hash = `#/server/${c.dataset.server}`);
+      c.onkeydown = (e) => e.key === 'Enter' && c.click();
+    });
+    for (const id of ['add', 'add2']) { const b = document.getElementById(id); if (b) b.onclick = () => addServerModal(load); }
+  };
+  await load();
+  setRefresh(load);
+}
+
+function serverCard(s, report) {
+  const m = s.latest || {};
+  const st = !s.online ? 'offline' : report?.status || 'ok';
+  const memMax = m.mem_total_mb || s.mem_total_mb;
+  const diskMax = m.disk_total_gb || s.disk_total_gb;
+  return `<div class="card server-card" data-server="${s.id}" tabindex="0" role="link" aria-label="Apri ${esc(s.name)}">
+    <div class="card-head"><div><h2>${esc(s.name)}</h2><div class="muted" style="font-size:12px">${esc(s.hostname || 'agent non ancora collegato')}</div></div>${badge(st)}</div>
+    <div class="meters">
+      ${meter('CPU', m.cpu_pct, 100, fmt.pct, { hideMax: true })}
+      ${meter('RAM', m.mem_used_mb, memMax, fmt.mb)}
+      ${meter('Disco', m.disk_used_gb, diskMax, fmt.gb, { warn: 80 })}
+    </div>
+    <div class="meta"><span>${s.cpu_cores ? `${s.cpu_cores} vCPU · ` : ''}${s.apps} app</span><span>${s.last_seen ? `visto ${ago(s.last_seen)}` : 'mai visto'}</span></div>
+  </div>`;
+}
+
+function addServerModal(onDone) {
+  modal(`
+    <h2>Aggiungi server</h2>
+    <form id="f">
+      <div class="field"><label for="n">Nome</label><input id="n" required pattern="[a-zA-Z0-9][a-zA-Z0-9._\\-]{0,62}" placeholder="es. ops-prod-01"></div>
+      <div class="field"><label for="no">Note (opzionale)</label><input id="no" placeholder="es. Hetzner CX41, Falkenstein"></div>
+      <div class="err" id="e"></div>
+      <div class="modal-actions"><button type="button" data-close>Annulla</button><button class="primary">Crea</button></div>
+    </form>`, (m, close) => {
+    m.querySelector('#f').onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        const r = await api('/api/servers', { method: 'POST', body: { name: m.querySelector('#n').value.trim(), notes: m.querySelector('#no').value } });
+        close();
+        installModal(r, 'Server creato');
+        onDone && onDone();
+      } catch (err) { m.querySelector('#e').textContent = err.message; }
+    };
+  });
+}
+
+function installModal(r, title) {
+  modal(`
+    <h2>${esc(title)}</h2>
+    <p class="ink2">Esegui questo comando sul server <b>${esc(r.name || '')}</b> (richiede Python 3 e systemd). Il token è mostrato <b>una sola volta</b>.</p>
+    <pre class="copy" id="cmd">${esc(r.install)}</pre>
+    <p class="muted" style="font-size:13px">Per monitorare le app definite localmente modifica <code>/etc/zdt-agent/config.json</code>; per creare app dalla console installa gli hook in <code>/etc/zdt-agent/hooks/</code>.</p>
+    <div class="modal-actions"><button id="cp">Copia</button><button class="primary" data-close>Fatto</button></div>`, (m) => {
+    m.querySelector('#cp').onclick = async (e) => {
+      try { await navigator.clipboard.writeText(r.install); e.target.textContent = 'Copiato ✓'; } catch { e.target.textContent = 'Seleziona e copia'; }
+    };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Server detail
+// ---------------------------------------------------------------------------
+async function renderServer(id) {
+  const main = shell('servers', '<div class="loading">Caricamento…</div>');
+  const load = async () => {
+    const [s, metrics] = await Promise.all([api(`/api/servers/${id}`), api(`/api/servers/${id}/metrics?range=${state.range}`)]);
+    const m = s.latest || {};
+    const extra = m.extra || {};
+    const memMax = m.mem_total_mb || s.mem_total_mb;
+    const diskMax = m.disk_total_gb || s.disk_total_gb;
+    main.innerHTML = `
+      <div class="page-head">
+        <div>
+          <div class="muted" style="font-size:13px"><a href="#/">Server</a> /</div>
+          <div class="row"><h1>${esc(s.name)}</h1>${badge(s.online ? 'online' : 'offline')}</div>
+          <p>${esc([s.hostname, s.os, s.cpu_cores && `${s.cpu_cores} vCPU`, s.mem_total_mb && fmt.mb(s.mem_total_mb) + ' RAM', s.disk_total_gb && fmt.gb(s.disk_total_gb) + ' disco'].filter(Boolean).join(' · ') || 'Agent non ancora collegato')}
+          ${s.last_seen ? ` · visto ${ago(s.last_seen)}` : ''}${s.agent_version ? ` · agent ${esc(s.agent_version)}` : ''}</p>
+          ${s.notes ? `<p class="muted">${esc(s.notes)}</p>` : ''}
+        </div>
+        <div class="row">
+          <button class="primary" id="newapp">+ Nuova app (portale)</button>
+          <button id="token">Installa agent</button>
+          <button class="danger" id="del">Elimina</button>
+        </div>
+      </div>
+
+      <div class="grid cards">
+        <div class="card"><div class="meters">
+          ${meter('CPU', m.cpu_pct, 100, fmt.pct, { hideMax: true })}
+          ${meter('RAM', m.mem_used_mb, memMax, fmt.mb)}
+          ${meter('Disco', m.disk_used_gb, diskMax, fmt.gb, { warn: 80 })}
+        </div></div>
+        <div class="card"><table><tbody>
+          <tr><td class="muted">Load (1/5/15)</td><td class="r">${[m.load1, m.load5, m.load15].map((v) => (v == null ? '–' : v.toFixed(2))).join(' / ')}</td></tr>
+          <tr><td class="muted">Swap</td><td class="r">${fmt.mb(m.swap_used_mb)}</td></tr>
+          <tr><td class="muted">Rete ↓ / ↑</td><td class="r">${fmt.bps(m.net_rx_bps)} / ${fmt.bps(m.net_tx_bps)}</td></tr>
+          <tr><td class="muted">iowait / steal</td><td class="r">${fmt.pct(extra.iowait_pct)} / ${fmt.pct(extra.steal_pct)}</td></tr>
+          <tr><td class="muted">Connessioni TCP · processi</td><td class="r">${extra.tcp_established ?? '–'} · ${m.procs ?? '–'}</td></tr>
+          <tr><td class="muted">Uptime</td><td class="r">${m.uptime_s ? `${Math.floor(m.uptime_s / 86400)} g ${Math.floor((m.uptime_s % 86400) / 3600)} h` : '–'}</td></tr>
+        </tbody></table></div>
+      </div>
+
+      <div class="section">
+        <div class="row" style="justify-content:space-between;margin-bottom:12px"><h2>Andamento</h2>${rangeSeg()}</div>
+        <div class="grid two">
+          ${chartCard('c-cpu', 'CPU', fmt.pct(m.cpu_pct))}
+          ${chartCard('c-mem', 'RAM utilizzata', fmt.mb(m.mem_used_mb))}
+          ${chartCard('c-disk', 'Disco utilizzato', fmt.gb(m.disk_used_gb))}
+          ${chartCard('c-net', 'Traffico di rete', '')}
+          ${chartCard('c-load', 'Load average (1 min)', m.load1 == null ? '–' : m.load1.toFixed(2))}
+        </div>
+      </div>
+
+      <div class="section">
+        <h2>App ospitate</h2>
+        <div class="card">${appsTable(s.apps)}</div>
+        <div id="app-detail"></div>
+      </div>
+
+      ${s.tasks.length ? `<div class="section"><h2>Operazioni recenti</h2><div class="card table-wrap"><table>
+        <thead><tr><th>#</th><th>Operazione</th><th>App</th><th>Stato</th><th>Esito</th><th>Aggiornato</th></tr></thead><tbody>
+        ${s.tasks.map((t) => `<tr><td class="muted">${t.id}</td><td>${t.action === 'create_app' ? 'Creazione app' : 'Rimozione app'}</td><td>${esc(t.app_name || JSON.parse(t.payload).name)}</td>
+          <td>${badge(t.status)}</td><td class="mono" style="max-width:420px;white-space:pre-wrap">${esc((t.message || '').slice(-300))}</td><td class="muted">${ago(t.updated_at)}</td></tr>`).join('')}
+        </tbody></table></div></div>` : ''}`;
+
+    const rows = metrics.rows;
+    const ts = rows.map((r) => r.t);
+    const span = { from: metrics.from, to: metrics.to };
+    lineChart(document.getElementById('c-cpu'), { ...span, ts, series: [{ name: 'CPU', values: rows.map((r) => r.cpu_pct), color: C.s1 }], yMax: 100, format: fmt.pct, limit: { value: 85, label: 'saturazione 85%' } });
+    lineChart(document.getElementById('c-mem'), { ...span, ts, series: [{ name: 'RAM', values: rows.map((r) => r.mem_used_mb), color: C.s1 }], yMax: memMax || undefined, format: fmt.mb, limit: memMax ? { value: memMax * 0.9, label: '90%' } : null });
+    lineChart(document.getElementById('c-disk'), { ...span, ts, series: [{ name: 'Disco', values: rows.map((r) => r.disk_used_gb), color: C.s1 }], yMax: diskMax || undefined, format: fmt.gb });
+    lineChart(document.getElementById('c-net'), { ...span, ts, series: [{ name: 'In entrata', values: rows.map((r) => r.net_rx_bps), color: C.s1 }, { name: 'In uscita', values: rows.map((r) => r.net_tx_bps), color: C.s2 }], format: fmt.bps });
+    lineChart(document.getElementById('c-load'), { ...span, ts, series: [{ name: 'Load 1m', values: rows.map((r) => r.load1), color: C.s1 }], format: fmt.num, limit: s.cpu_cores ? { value: s.cpu_cores, label: `${s.cpu_cores} core` } : null });
+
+    main.querySelectorAll('[data-range]').forEach((b) => (b.onclick = () => { state.range = b.dataset.range; load(); }));
+    document.getElementById('newapp').onclick = () => newAppModal(s, load);
+    document.getElementById('token').onclick = async () => {
+      if (!confirm('Generare un nuovo token? Il token attuale smetterà di funzionare e andrà reinstallato l\'agent.')) return;
+      const r = await api(`/api/servers/${id}/token`, { method: 'POST' });
+      installModal({ ...r, name: s.name }, 'Installa / reinstalla agent');
+    };
+    document.getElementById('del').onclick = async () => {
+      if (!confirm(`Eliminare ${s.name} e tutte le sue metriche? L'operazione è irreversibile.`)) return;
+      await api(`/api/servers/${id}`, { method: 'DELETE' });
+      location.hash = '#/';
+    };
+    main.querySelectorAll('[data-app]').forEach((tr) => (tr.onclick = (e) => {
+      if (e.target.closest('button')) return;
+      state.selectedApp = Number(tr.dataset.app);
+      main.querySelectorAll('[data-app]').forEach((x) => x.classList.toggle('selected', x === tr));
+      showApp(s.apps.find((a) => a.id === state.selectedApp));
+    }));
+    main.querySelectorAll('[data-del-app]').forEach((b) => (b.onclick = async () => {
+      const app = s.apps.find((a) => a.id === Number(b.dataset.delApp));
+      const deprov = confirm(`Rimuovere "${app.name}" anche dal server (esegue l'hook remove_app)?\n\nOK = rimuovi dal server · Annulla = scegli se smettere solo di monitorarla`);
+      if (!deprov && !confirm(`Smettere di monitorare "${app.name}" senza toccare il server?`)) return;
+      await api(`/api/apps/${app.id}${deprov ? '?deprovision=1' : ''}`, { method: 'DELETE' });
+      load();
+    }));
+    const sel = s.apps.find((a) => a.id === state.selectedApp);
+    if (sel) { main.querySelector(`[data-app="${sel.id}"]`)?.classList.add('selected'); showApp(sel); }
+  };
+  await load();
+  setRefresh(load);
+}
+
+const rangeSeg = () => `<div class="seg" role="group" aria-label="Periodo">${['1h', '6h', '24h', '7d', '30d'].map((r) => `<button data-range="${r}" class="${state.range === r ? 'on' : ''}">${r.replace('d', 'g')}</button>`).join('')}</div>`;
+const chartCard = (id, title, now) => `<div class="card"><div class="chart-title"><h3>${esc(title)}</h3><span class="now num">${esc(now)}</span></div><div id="${id}"></div></div>`;
+
+function appsTable(apps) {
+  if (!apps.length) return `<div class="empty-state"><p>Nessuna app. Crea un portale con <b>+ Nuova app</b> oppure definiscile in <code>/etc/zdt-agent/config.json</code>: l'agent le registra in automatico.</p></div>`;
+  return `<div class="table-wrap"><table>
+    <thead><tr><th>App</th><th>Tipo</th><th>Stato</th><th class="r">CPU ora</th><th class="r">RAM ora</th><th class="r">CPU media 24h</th><th class="r">RAM max 24h</th><th>Dominio</th><th></th></tr></thead>
+    <tbody>${apps.map((a) => `<tr class="clickable" data-app="${a.id}">
+      <td><b>${esc(a.name)}</b><div class="muted mono" style="font-size:11.5px">${esc(a.kind)}: ${esc(a.match || '')}</div></td>
+      <td>${esc({ portal: 'Portale', service: 'Servizio', other: 'Altro' }[a.type] || a.type)}</td>
+      <td>${badge(a.status)}${a.status === 'error' && a.status_msg ? `<div class="muted" style="font-size:12px;max-width:240px">${esc(a.status_msg.slice(-120))}</div>` : ''}</td>
+      <td class="r">${a.latest ? fmt.cores(a.latest.cpu_pct / 100) : '–'}</td>
+      <td class="r">${a.latest ? fmt.mb(a.latest.mem_mb) : '–'}</td>
+      <td class="r">${a.last24h.cpu_avg == null ? '–' : fmt.cores(a.last24h.cpu_avg / 100)}</td>
+      <td class="r">${fmt.mb(a.last24h.mem_max)}</td>
+      <td>${a.domain ? esc(a.domain) : '<span class="muted">–</span>'}${a.port ? `<span class="muted">:${a.port}</span>` : ''}</td>
+      <td class="r"><button class="small danger" data-del-app="${a.id}" aria-label="Rimuovi ${esc(a.name)}">Rimuovi</button></td>
+    </tr>`).join('')}</tbody></table></div>
+    <p class="muted" style="font-size:12px;margin:10px 0 0">CPU in core (1,00 = un core pieno). Clicca su un'app per vederne l'andamento.</p>`;
+}
+
+async function showApp(app) {
+  const box = document.getElementById('app-detail');
+  if (!box || !app) return;
+  const d = await api(`/api/apps/${app.id}/metrics?range=${state.range}`);
+  const ts = d.rows.map((r) => r.t);
+  box.innerHTML = `<div class="grid two" style="margin-top:16px">${chartCard('a-cpu', `${app.name} · CPU`, '')}${chartCard('a-mem', `${app.name} · RAM`, '')}</div>`;
+  lineChart(document.getElementById('a-cpu'), { from: d.from, to: d.to, ts, series: [{ name: 'CPU', values: d.rows.map((r) => (r.cpu_pct == null ? null : r.cpu_pct / 100)), color: C.s1 }], format: fmt.cores });
+  lineChart(document.getElementById('a-mem'), { from: d.from, to: d.to, ts, series: [{ name: 'RAM', values: d.rows.map((r) => r.mem_mb), color: C.s1 }], format: fmt.mb });
+}
+
+function newAppModal(server, onDone) {
+  modal(`
+    <h2>Nuova app su ${esc(server.name)}</h2>
+    <form id="f">
+      <div class="field"><label for="n">Nome app</label><input id="n" required pattern="[a-zA-Z0-9][a-zA-Z0-9._\\-]{0,62}" placeholder="es. ops-cliente-rossi"></div>
+      <div class="inline-fields" style="margin-bottom:14px">
+        <div class="field" style="flex:1"><label for="t">Tipo</label><select id="t"><option value="portal">Portale</option><option value="service">Servizio</option><option value="other">Altro</option></select></div>
+        <div class="field" style="flex:1"><label for="k">Esecuzione</label><select id="k"><option value="docker">Docker</option><option value="systemd">Servizio systemd</option><option value="process">Processo</option></select></div>
+      </div>
+      <div class="inline-fields" style="margin-bottom:14px">
+        <div class="field" style="flex:2"><label for="d">Dominio</label><input id="d" placeholder="cliente.zerodarkteam.it"></div>
+        <div class="field" style="flex:1"><label for="p">Porta</label><input id="p" type="number" min="1" max="65535" placeholder="8080"></div>
+      </div>
+      <div class="field"><label for="tpl">Template</label><input id="tpl" value="portal"><small>Cartella in <code>/etc/zdt-agent/templates/</code> usata dall'hook <code>create_app</code>.</small></div>
+      <div class="field"><label for="mt">Criterio di monitoraggio (opzionale)</label><input id="mt" placeholder="regex su nome container / processo, oppure unit systemd"><small>Vuoto = nome dell'app. L'hook può aggiornarlo dopo la creazione.</small></div>
+      <div class="field"><label style="display:flex;gap:8px;align-items:center;color:var(--ink)"><input id="pv" type="checkbox" checked style="width:auto"> Crea l'app sul server (esegue l'hook <code>create_app</code> tramite l'agent)</label>
+        <small>Se disattivato, l'app viene solo registrata e monitorata.</small></div>
+      <div class="err" id="e"></div>
+      <div class="modal-actions"><button type="button" data-close>Annulla</button><button class="primary">Crea app</button></div>
+    </form>`, (m, close) => {
+    const v = (id) => m.querySelector(id).value.trim();
+    m.querySelector('#f').onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        await api(`/api/servers/${server.id}/apps`, {
+          method: 'POST',
+          body: { name: v('#n'), type: v('#t'), kind: v('#k'), domain: v('#d') || null, port: v('#p') ? Number(v('#p')) : null, template: v('#tpl') || null, match: v('#mt') || null, provision: m.querySelector('#pv').checked },
+        });
+        close();
+        onDone();
+      } catch (err) { m.querySelector('#e').textContent = err.message; }
+    };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Analysis
+// ---------------------------------------------------------------------------
+async function renderAnalysis() {
+  const main = shell('analysis', '<div class="loading">Calcolo in corso…</div>');
+  const q = () => `days=${state.days}&headroom=${state.headroom / 100}&n=${state.n}`;
+  const load = async () => {
+    main.querySelector('#results')?.setAttribute('aria-busy', 'true');
+    const a = await api(`/api/analysis?${q()}`);
+    const v = VERDICT[a.fleet.verdict];
+    main.innerHTML = `
+      <div class="page-head">
+        <div><h1>Capacità & combinazioni</h1><p>Percentile 95 su ${a.params.days} giorni · soglia di sicurezza ${Math.round(a.params.headroom * 100)}% · calcolato ${new Date(a.generated_at).toLocaleTimeString('it-IT')}</p></div>
+        <form class="inline-fields" id="params">
+          <div class="field"><label for="days">Finestra</label><select id="days">${[1, 7, 14, 30, 60, 90].map((d) => `<option value="${d}" ${d === state.days ? 'selected' : ''}>${d} giorni</option>`).join('')}</select></div>
+          <div class="field"><label for="hr">Soglia picchi</label><select id="hr">${[60, 70, 75, 80, 85, 90].map((h) => `<option value="${h}" ${h === state.headroom ? 'selected' : ''}>${h}%</option>`).join('')}</select></div>
+          <div class="field"><label for="nn">Combinazioni</label><select id="nn">${[3, 5, 10].map((n) => `<option ${n === state.n ? 'selected' : ''}>${n}</option>`).join('')}</select></div>
+        </form>
+      </div>
+      <div id="results">
+      <div class="banner"><div class="icon" aria-hidden="true">${v[0]}</div><div><b>${v[1]}</b><p>${a.fleet.advice.map(esc).join(' ')}</p>
+        <p class="muted num">Flotta: ${fmt.cores(a.fleet.usage_p95.cpu_cores)} su ${a.fleet.capacity.cpu_cores} vCPU · ${fmt.mb(a.fleet.usage_p95.mem_mb)} su ${fmt.mb(a.fleet.capacity.mem_mb)} RAM (p95)</p></div></div>
+
+      <div class="section"><h2>Server</h2><div class="card table-wrap"><table>
+        <thead><tr><th>Server</th><th>Stato</th><th class="r">CPU p95</th><th class="r">RAM p95</th><th class="r">Disco</th><th class="r">Crescita disco</th><th class="r">Base (non-app)</th><th>Indicazioni</th></tr></thead>
+        <tbody>${a.servers.map((s) => `<tr>
+          <td><a href="#/server/${s.id}"><b>${esc(s.name)}</b></a><div class="muted" style="font-size:12px">${s.capacity.cpu_cores ?? '?'} vCPU · ${fmt.mb(s.capacity.mem_mb)}</div></td>
+          <td>${badge(s.status)}</td>
+          <td class="r">${fmt.pct(s.cpu.p95_pct)}</td>
+          <td class="r">${fmt.pct(s.mem.p95_pct)}<div class="muted" style="font-size:12px">${fmt.mb(s.mem.p95_mb)}</div></td>
+          <td class="r">${fmt.pct(s.disk.pct)}${s.disk.days_to_full != null ? `<div class="muted" style="font-size:12px">pieno in ~${s.disk.days_to_full} g</div>` : ''}</td>
+          <td class="r">${s.disk.growth_gb_per_day == null ? '–' : `${s.disk.growth_gb_per_day > 0 ? '+' : ''}${s.disk.growth_gb_per_day.toFixed(2)} GB/g`}</td>
+          <td class="r">${fmt.cores(s.base.cpu_p95_cores)}<div class="muted" style="font-size:12px">${fmt.mb(s.base.mem_p95_mb)}</div></td>
+          <td>${s.advice.length ? `<ul class="advice">${s.advice.map((x) => `<li><i class="dot st-${x.level}" style="background:var(--${x.level === 'critical' || x.level === 'offline' ? 'critical' : x.level === 'warning' ? 'warning' : 'accent'})"></i><span>${esc(x.text)}</span></li>`).join('')}</ul>` : '<span class="muted">Nessuna criticità</span>'}</td>
+        </tr>`).join('')}</tbody></table></div></div>
+
+      <div class="section"><h2>App</h2><div class="card table-wrap"><table>
+        <thead><tr><th>App</th><th>Server</th><th class="r">CPU media</th><th class="r">CPU p95</th><th class="r">RAM media</th><th class="r">RAM p95</th><th class="r">Trend RAM</th><th>Profilo orario CPU</th></tr></thead>
+        <tbody>${a.apps.map((x) => `<tr>
+          <td><b>${esc(x.name)}</b></td><td>${esc(a.servers.find((s) => s.id === x.server_id)?.name || '')}</td>
+          <td class="r">${fmt.cores(x.cpu.avg_cores)}</td><td class="r">${fmt.cores(x.cpu.p95_cores)}</td>
+          <td class="r">${fmt.mb(x.mem.avg_mb)}</td><td class="r">${fmt.mb(x.mem.p95_mb)}</td>
+          <td class="r">${x.trend.mem_mb_per_day == null ? '–' : `${x.trend.mem_mb_per_day > 0 ? '+' : ''}${x.trend.mem_mb_per_day.toFixed(1)} MB/g`}</td>
+          <td>${sparkBars(x.profile_hourly.cpu_cores)}</td>
+        </tr>`).join('') || '<tr><td colspan="8" class="muted">Nessuna app con metriche.</td></tr>'}</tbody></table></div>
+        <p class="muted" style="font-size:12px">Il profilo orario (0–23) mostra quando ogni app consuma: app con picchi in orari diversi possono condividere lo stesso server.</p></div>
+
+      <div class="section"><h2>Combinazioni proposte</h2>
+        <p class="ink2" style="margin-top:-6px">Il motore simula ogni distribuzione sommando le serie storiche delle app (non i singoli picchi) più il consumo di base di ogni server, e ordina per picco massimo, bilanciamento e numero di spostamenti.</p>
+        ${a.current ? combo(a.current, 'Distribuzione attuale', false) : ''}
+        <div class="grid" style="margin-top:16px">${a.combinations.map((c, i) => combo(c, `#${c.rank}${i === 0 ? ' · consigliata' : ''}`, i === 0)).join('') || '<div class="card muted">Servono metriche delle app per proporre combinazioni.</div>'}</div>
+      </div>
+
+      <div class="section"><h2>Export per il tool AI</h2><div class="card">
+        <p class="ink2" style="margin-top:0">Il tool di riassortimento può leggere lo stesso input (server, app, percentili, profili orari, combinazioni) in JSON:</p>
+        <pre class="copy">curl -H "Authorization: Bearer $EXPORT_TOKEN" "${esc(location.origin)}/api/v1/export?${esc(q())}"</pre>
+        <div class="row" style="margin-top:12px"><button id="dl">Scarica JSON</button><span class="muted" style="font-size:12px">Il token si imposta con la variabile d'ambiente <code>EXPORT_TOKEN</code> del server.</span></div>
+      </div></div>
+      </div>`;
+    const p = main.querySelector('#params');
+    p.onchange = () => {
+      state.days = Number(p.querySelector('#days').value);
+      state.headroom = Number(p.querySelector('#hr').value);
+      state.n = Number(p.querySelector('#nn').value);
+      load();
+    };
+    main.querySelector('#dl').onclick = async () => {
+      const data = await api(`/api/v1/export?${q()}`);
+      const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
+      const link = Object.assign(document.createElement('a'), { href: url, download: `capacity-${new Date().toISOString().slice(0, 10)}.json` });
+      link.click();
+      URL.revokeObjectURL(url);
+    };
+  };
+  await load();
+  setRefresh(null);
+}
+
+function sparkBars(values) {
+  const max = Math.max(...values.filter((v) => v != null), 0);
+  if (!max) return '<span class="muted">–</span>';
+  const w = 4;
+  const gap = 1;
+  const h = 22;
+  const bars = values.map((v, i) => {
+    const bh = v == null ? 0 : Math.max(1, (v / max) * h);
+    return `<rect x="${i * (w + gap)}" y="${h - bh}" width="${w}" height="${bh}" rx="1" fill="var(--s1)"><title>${String(i).padStart(2, '0')}:00 · ${fmt.cores(v)}</title></rect>`;
+  });
+  return `<svg width="${24 * (w + gap)}" height="${h}" role="img" aria-label="Profilo orario CPU">${bars.join('')}</svg>`;
+}
+
+function combo(c, title, best) {
+  const hr = state.headroom;
+  return `<div class="combo ${best ? 'best' : ''}">
+    <div class="combo-head"><h3>${esc(title)}</h3>
+      <div class="row">${c.requires_new_server ? badge('info', 'richiede nuovo server') : ''}${badge(c.feasible ? 'ok' : 'critical', c.feasible ? `entro soglia ${hr}%` : 'oltre soglia')}
+      <span class="muted num" style="font-size:12px">picco ${fmt.pct(c.peak_util_pct)} · ${c.moves.length} spostamenti</span></div></div>
+    <div class="combo-servers">${c.servers.map((s) => `<div class="combo-server ${s.virtual ? 'virtual' : ''}">
+      <div class="row" style="justify-content:space-between;margin-bottom:8px"><b>${esc(s.name)}</b><span class="muted" style="font-size:12px">${s.capacity.cpu_cores} vCPU · ${fmt.mb(s.capacity.mem_mb)}</span></div>
+      <div class="meters">
+        ${meter('CPU p95', s.cpu_p95_pct, 100, fmt.pct, { warn: hr - 10, crit: hr, mark: hr, hideMax: true })}
+        ${meter('RAM p95', s.mem_p95_pct, 100, fmt.pct, { warn: hr - 10, crit: hr, mark: hr, hideMax: true })}
+      </div>
+      <div class="chips">${s.apps.map((n) => `<span class="chip ${c.moves.some((m) => m.app === n) ? 'moved' : ''}">${esc(n)}</span>`).join('') || '<span class="muted" style="font-size:12px">nessuna app</span>'}</div>
+    </div>`).join('')}</div>
+    ${c.moves.length ? `<ul class="moves">${c.moves.map((m) => `<li>Sposta <b>${esc(m.app)}</b> → ${esc(m.to_name)}</li>`).join('')}</ul>` : ''}
+  </div>`;
+}
+
+// ---------------------------------------------------------------------------
+// Router
+// ---------------------------------------------------------------------------
+async function route() {
+  try {
+    if (!state.me) state.me = await api('/api/me');
+    if (!state.me.authenticated) return renderLogin();
+    const h = location.hash || '#/';
+    let m;
+    if ((m = h.match(/^#\/server\/(\d+)/))) {
+      if (state.lastServer !== m[1]) { state.selectedApp = null; state.lastServer = m[1]; }
+      return await renderServer(m[1]);
+    }
+    if (h.startsWith('#/analysis')) return await renderAnalysis();
+    return await renderOverview();
+  } catch (e) {
+    if (e.message !== 'Sessione scaduta') {
+      const main = document.getElementById('main') || $app;
+      main.innerHTML = `<div class="card empty-state"><h2>Qualcosa è andato storto</h2><p>${esc(e.message)}</p><button onclick="location.reload()">Riprova</button></div>`;
+    }
+  }
+}
+
+try { const t = localStorage.getItem('zdt-theme'); if (t) document.documentElement.dataset.theme = t; } catch { /* ignore */ }
+window.addEventListener('hashchange', route);
+route();

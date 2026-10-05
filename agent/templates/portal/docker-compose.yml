@@ -1,0 +1,11 @@
+# Example "portale" template used by hooks/create_app. Replace the image with your OPS portal image.
+# Variables come from the .env written by the hook: APP_NAME, APP_DOMAIN, APP_PORT.
+services:
+  web:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${APP_PORT}:80"
+    labels:
+      zdt.app: "${APP_NAME}"
+      zdt.domain: "${APP_DOMAIN}"

@@ -1,0 +1,33 @@
+# Production stack for console.zerodarkteam.it: the console + Caddy (automatic HTTPS via Let's Encrypt).
+#   cp .env.example .env && edit it, then: docker compose up -d --build
+services:
+  console:
+    build: ..
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PUBLIC_URL: https://${DOMAIN:-console.zerodarkteam.it}
+    volumes:
+      - console-data:/data
+    expose:
+      - "8080"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:-console.zerodarkteam.it}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - console
+
+volumes:
+  console-data:
+  caddy-data:
+  caddy-config:

@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Example de-provisioning hook (counterpart of create_app). Data in /srv/apps/<name> is archived, not deleted.
+set -euo pipefail
+TARGET="/srv/apps/$ZDT_APP_NAME"
+[ -d "$TARGET" ] || { echo "$TARGET non esiste: nulla da rimuovere"; exit 0; }
+cd "$TARGET"
+docker compose -p "$ZDT_APP_NAME" down
+cd /srv/apps
+mv "$TARGET" "$TARGET.removed-$(date +%Y%m%d%H%M%S)"
+echo "App $ZDT_APP_NAME fermata e archiviata"

@@ -1,0 +1,45 @@
+name: CI & deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm test
+      - run: python3 -m py_compile agent/zdt-agent.py
+
+  # Deploys to the host behind console.zerodarkteam.it over SSH.
+  # Required repository secrets: DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY (and optionally DEPLOY_PATH).
+  # On the host: Docker + compose plugin, and deploy/.env created once from deploy/.env.example.
+  deploy:
+    needs: test
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+    steps:
+      - name: Skip when deploy secrets are missing
+        if: env.DEPLOY_HOST == ''
+        run: echo "::notice::DEPLOY_HOST non configurato, deploy saltato"
+      - uses: actions/checkout@v4
+        if: env.DEPLOY_HOST != ''
+      - name: Sync & restart
+        if: env.DEPLOY_HOST != ''
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          DIR: ${{ secrets.DEPLOY_PATH || '/opt/zerodark-console' }}
+        run: |
+          mkdir -p ~/.ssh && echo "$SSH_KEY" > ~/.ssh/id && chmod 600 ~/.ssh/id
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+          rsync -az --delete --exclude .git --exclude deploy/.env -e "ssh -i ~/.ssh/id" ./ "$USER@$DEPLOY_HOST:$DIR/"
+          ssh -i ~/.ssh/id "$USER@$DEPLOY_HOST" "cd $DIR/deploy && test -f .env && docker compose up -d --build && docker image prune -f"

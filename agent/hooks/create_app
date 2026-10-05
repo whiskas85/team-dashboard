@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Example provisioning hook, executed by zdt-agent when you create an app ("portale") from the console.
+# Install:  cp create_app remove_app /etc/zdt-agent/hooks/ && chmod +x /etc/zdt-agent/hooks/*
+#
+# Inputs (env): ZDT_APP_NAME ZDT_APP_TYPE ZDT_APP_KIND ZDT_APP_MATCH ZDT_APP_DOMAIN ZDT_APP_PORT ZDT_APP_TEMPLATE
+# Exit 0 = success. Output is shown in the console. An optional final JSON line updates how the app is monitored.
+#
+# This example deploys /etc/zdt-agent/templates/<template>/docker-compose.yml as compose project <name>.
+set -euo pipefail
+
+TEMPLATE="${ZDT_APP_TEMPLATE:-portal}"
+DIR="/etc/zdt-agent/templates/$TEMPLATE"
+TARGET="/srv/apps/$ZDT_APP_NAME"
+
+[ -f "$DIR/docker-compose.yml" ] || { echo "Template $TEMPLATE non trovato in $DIR"; exit 1; }
+[ -e "$TARGET" ] && { echo "$TARGET esiste già"; exit 1; }
+
+mkdir -p "$TARGET"
+cp -r "$DIR/." "$TARGET/"
+cat > "$TARGET/.env" <<ENV
+APP_NAME=$ZDT_APP_NAME
+APP_DOMAIN=$ZDT_APP_DOMAIN
+APP_PORT=${ZDT_APP_PORT:-8080}
+ENV
+
+cd "$TARGET"
+docker compose -p "$ZDT_APP_NAME" up -d
+echo "App $ZDT_APP_NAME avviata in $TARGET"
+# Monitor every container of the compose project
+echo "{\"kind\": \"docker\", \"match\": \"^${ZDT_APP_NAME}-\"}"
