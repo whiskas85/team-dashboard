@@ -53,7 +53,13 @@ say "Porte 80/443: ${owner:-libere}"
 proxy_mode() {
   say "Avvio la console su 127.0.0.1:$CONSOLE_PORT"
   docker compose down --remove-orphans >/dev/null 2>&1 || true
-  docker compose -f docker-compose.proxy.yml up -d --build
+  local files=(-f docker-compose.proxy.yml)
+  # Re-join the existing reverse proxy's network (kept in .env) so updates do not break the published site
+  if grep -q '^PROXY_NETWORK=.' .env; then
+    files+=(-f docker-compose.network.yml)
+    say "Collego la console alla rete del proxy: $(grep '^PROXY_NETWORK=' .env | tail -1 | cut -d= -f2)"
+  fi
+  docker compose "${files[@]}" up -d --build
 }
 
 health() {

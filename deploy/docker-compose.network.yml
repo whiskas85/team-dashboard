@@ -1,0 +1,14 @@
+# Added by setup.sh when PROXY_NETWORK is set in .env: joins the console to the Docker network of an
+# existing reverse proxy container (e.g. a Caddy that already serves 80/443) under the alias "zerodark-console".
+name: zerodark-console
+services:
+  console:
+    networks:
+      default: {}
+      edge:
+        aliases: [zerodark-console]
+
+networks:
+  edge:
+    external: true
+    name: ${PROXY_NETWORK}
