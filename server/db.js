@@ -95,6 +95,7 @@ const MIGRATIONS = [
   ['apps', 'health_code', 'INTEGER'], // HTTP status (0 = unreachable)
   ['apps', 'health_at', 'INTEGER'],
   ['apps', 'health_error', 'TEXT'],   // short human-readable reason when down
+  ['apps', 'provisioned', 'INTEGER NOT NULL DEFAULT 0'], // 1 = created on the server by the console
 ];
 
 function open(file) {
@@ -106,6 +107,8 @@ function open(file) {
     const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
     if (!cols.includes(col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
   }
+  // Apps the console provisioned before the flag existed
+  db.exec("UPDATE apps SET provisioned = 1 WHERE provisioned = 0 AND id IN (SELECT app_id FROM tasks WHERE action = 'create_app')");
   return db;
 }
 
