@@ -753,6 +753,13 @@ route('GET', '/api/apps/:id/credentials', (req, p) => {
   if (!c) throw new HttpError(404, 'Nessuna credenziale iniziale per questa app');
   return { ...c, login_url: app.domain ? `https://${app.domain}/login` : null };
 });
+function agentAtLeast(version, min) {
+  const a = String(version || '').split('.').map(Number);
+  const b = min.split('.').map(Number);
+  if (a.some(Number.isNaN) || a.length < 2) return false;
+  for (let i = 0; i < b.length; i++) if ((a[i] || 0) !== b[i]) return (a[i] || 0) > b[i];
+  return true;
+}
 // New first-access password for a portal created by the gestionale scripts (e.g. when create_app
 // picked its own, or the owner lost it): the set_admin_password hook applies it and confirms.
 route('POST', '/api/apps/:id/credentials/reset', (req, p) => {
@@ -761,6 +768,9 @@ route('POST', '/api/apps/:id/credentials/reset', (req, p) => {
   if (!app) throw new HttpError(404, 'App non trovata');
   if (app.type !== 'portal' || !app.provisioned) throw new HttpError(400, 'Solo per i portali delle squadre (creati dagli script del gestionale)');
   if (app.status !== 'active') throw new HttpError(400, 'Il portale deve essere attivo');
+  // Agents before 0.1.3 do not pass ZDT_APP_ADMIN_PASSWORD to hooks: the hook would only see an empty password.
+  const agent = db.prepare('SELECT agent_version FROM servers WHERE id = ?').get(app.server_id)?.agent_version;
+  if (!agentAtLeast(agent, '0.1.3')) throw new HttpError(400, `L'agent sul server è troppo vecchio (${agent || 'versione sconosciuta'}) e non passa la password agli script: reinstallalo dal dettaglio server con «Installa agent», poi riprova.`);
   const busy = db.prepare("SELECT 1 FROM tasks WHERE app_id = ? AND action = 'set_admin_password' AND status IN ('queued', 'sent')").get(app.id);
   if (busy) throw new HttpError(409, 'Una nuova password è già in preparazione');
   const t = now();
