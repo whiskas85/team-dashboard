@@ -382,6 +382,7 @@ function healthBadge(a) {
   const when = a.health_at ? ` · verificato ${ago(a.health_at)}` : '';
   let b;
   if (!a.health) b = badge('pending', 'Sito: in verifica');
+  else if (a.health === 'ok' && a.health_code === 401) b = `<span title="Il sito risponde ma chiede una password (401)${esc(when)}">${badge('ok', 'Sito raggiungibile · protetto')}</span>`;
   else if (a.health === 'ok') b = `<span title="/login risponde 200${esc(when)}">${badge('ok', 'Sito raggiungibile')}</span>`;
   else b = `<span title="${esc((a.health_error || 'non raggiungibile') + when)}">${badge('critical', a.health_code ? `Sito: errore ${a.health_code}` : 'Sito non raggiungibile')}</span>`;
   const why = a.health === 'down' && a.health_error ? `<div class="muted" style="font-size:12px;max-width:260px">${esc(a.health_error)}</div>` : '';
