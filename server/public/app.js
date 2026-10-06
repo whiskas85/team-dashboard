@@ -420,8 +420,17 @@ function versionInfo(a, { compact = false } = {}) {
   if (u.running) state = badge('warning', `${u.running.status === 'sent' ? 'Aggiornamento' : 'In coda'} → ${u.running.version}`);
   else if (u.last && !u.last.ok && u.last.at > Date.now() / 1000 - 7 * 86400 && a.version !== u.last.version) state = `<span title="${esc(u.last.message || '')}">${badge('critical', u.last.rolled_back ? `${u.last.version} non riuscita · tornato indietro` : `Aggiornamento a ${u.last.version} fallito`)}</span>`;
   else if (u.behind) state = badge('info', `Disponibile ${u.latest}`);
-  const auto = u.auto && !compact ? '<span class="muted" style="font-size:11.5px" title="Aggiornamento automatico notturno">auto</span>' : '';
+  const auto = compact && u.auto ? '<span class="muted" style="font-size:11.5px" title="Aggiornamento automatico notturno">auto</span>' : '';
   return `<div class="row" style="gap:6px;flex-wrap:wrap;align-items:center">${cur}${state}${auto}</div>`;
+}
+
+// Update mode of a squad: nightly automatic or manual only. Admins open the update dialog from it.
+function updateMode(a) {
+  if (!a.update) return '<span class="muted">–</span>';
+  const b = a.update.auto ? badge('ok', 'Automatico') : badge('unmonitored', 'Manuale');
+  return isAdmin() && a.status === 'active'
+    ? `<button type="button" class="badge-btn" data-update-app="${a.id}" title="${a.update.auto ? 'Ogni notte alla versione più recente' : 'Solo quando lo chiedi'} · clic per cambiare">${b}</button>`
+    : b;
 }
 
 // First-access credentials of portals created by the console: collapsed, admins only, fetched on open.
@@ -744,35 +753,28 @@ async function renderPortals() {
     const apps = await api('/api/apps?view=portals');
     busy = anyBusy(apps);
     const behind = apps.filter((a) => a.update?.behind && !a.update.running && a.status === 'active');
+    const checked = Math.max(0, ...apps.map((a) => a.update?.checked_at || 0)) || null;
     main.innerHTML = `${homeTabs('portals')}
-      <div class="page-head"><div><h1>Portali</h1><p>${apps.length} portali attivi · per crearne uno: apri un server → <b>+ Nuova app</b></p></div>
-        <div class="row admin-only">${apps.some((a) => a.update) ? '<button class="small" id="check-versions" title="Chiede ai server quali versioni del gestionale hanno">Controlla versioni</button>' : ''}
-        ${behind.length ? `<button class="small primary" id="update-all">Aggiorna tutti (${behind.length})</button>` : ''}</div></div>
+      <div class="page-head"><div><h1>Portali</h1><p>${apps.length} portali attivi · per crearne uno: apri un server → <b>+ Nuova app</b>${checked ? ` · versioni disponibili controllate ${ago(checked)}` : ''}</p></div>
+        <div class="row admin-only">${behind.length ? `<button class="small primary" id="update-all">Aggiorna tutti (${behind.length})</button>` : ''}</div></div>
       ${!apps.length ? '<div class="card empty-state"><p>Nessun portale. Apri un server e usa <b>+ Nuova app → Portale</b>.</p></div>' : `
       <div class="card table-wrap desktop-only"><table>
-        <thead><tr><th>Portale</th><th>Server</th><th>Stato</th><th>Versione</th><th>Sito</th><th class="r">CPU · RAM ora</th><th></th></tr></thead>
+        <thead><tr><th>Portale</th><th>Server</th><th>Stato</th><th>Versione</th><th>Aggiornamento</th><th>Sito</th><th class="r">CPU · RAM ora</th><th></th></tr></thead>
         <tbody>${apps.map((a) => `<tr class="clickable" data-goto-server="${a.server_id}">
           <td><b>${esc(a.name)}</b><div>${domainLink(a)}</div></td>
           <td>${esc(a.server_name)}</td>
           <td>${badge(a.status)}</td>
           <td>${versionInfo(a) || '<span class="muted">–</span>'}</td>
+          <td>${updateMode(a)}</td>
           <td>${healthBadge(a) || '<span class="muted">–</span>'}</td>
           <td class="r">${usage(a)}</td>
           <td class="r">${appActions(a)}</td></tr>`).join('')}</tbody></table></div>
       <div class="grid mobile-only">${apps.map((a) => `<div class="card portal-card" data-goto-server="${a.server_id}">
           <div class="card-head"><div><h2>${esc(a.name)}</h2><div style="font-size:13px">${domainLink(a)}</div></div>${badge(a.status)}</div>
-          ${healthBadge(a)}${versionInfo(a)}
+          ${healthBadge(a)}<div class="row" style="gap:6px;margin-top:6px">${versionInfo(a)}${a.update ? updateMode(a) : ''}</div>
           <div class="meta"><span>${esc(a.server_name)}</span><span>${usage(a)}</span></div>
           ${appActions(a)}</div>`).join('')}</div>`}`;
     wireAppActions(main, apps, load);
-    const check = main.querySelector('#check-versions');
-    if (check) check.onclick = async () => {
-      check.disabled = true;
-      check.textContent = 'Chiedo ai server…';
-      try { await api('/api/updates/check', { method: 'POST' }); check.textContent = 'Richiesta inviata: risposta entro un paio di minuti'; } catch (e) { check.textContent = e.message; }
-      busy = true;
-      setRefresh(load, 60000, () => busy);
-    };
     const all = main.querySelector('#update-all');
     if (all) all.onclick = async () => {
       if (!confirm(`Aggiornare ${behind.map((a) => `${a.name} (${a.version} → ${a.update.latest})`).join(', ')}?\n\nUno alla volta per server: backup, cambio versione, controllo. Se un gestionale non risponde torna da solo alla versione di prima. Ogni sito resta fermo circa un minuto.`)) return;
