@@ -1,15 +1,30 @@
 'use strict';
-// Portal reachability probe: GET https://<domain>/login must answer 200.
+// Portal reachability: is https://<domain>/login answering 200 for visitors?
 //
-// Names are resolved through public resolvers (Cloudflare, Google), like the gestionale's
-// squadra-server.sh does: the host resolver may still cache "this name does not exist" from
-// before the DNS record was created, which would keep a working portal marked as down.
+// Two steps:
+//  1. DNS, asked to public resolvers (Cloudflare, Google) like the gestionale's squadra-server.sh:
+//     the name must point where the console's own domain points (= this machine). The host
+//     resolver is not used for this: it may cache "no such name" from before the record existed.
+//  2. HTTPS. When the console sits on the reverse proxy's Docker network (PROXY_HOST, e.g.
+//     zd-proxy) it connects to the proxy directly, with the portal name as SNI and Host, and
+//     verifies the certificate for that name. Going out to the machine's own public IP from
+//     inside a container ("hairpin") is often blocked and would time out on a working site.
 
 const https = require('node:https');
 const dns = require('node:dns');
 
 const resolver = new dns.promises.Resolver({ timeout: 3000, tries: 2 });
 resolver.setServers(['1.1.1.1', '8.8.8.8']);
+
+/** Public IPv4 addresses of a name; null when the public resolvers cannot be reached. */
+async function publicResolve4(name) {
+  try {
+    return await resolver.resolve4(name);
+  } catch (e) {
+    if (e.code === 'ENOTFOUND' || e.code === 'ENODATA' || e.code === 'NXDOMAIN') return [];
+    return null;
+  }
+}
 
 // dns.lookup-compatible function for https.request: public resolvers first, system as fallback.
 function publicLookup(hostname, options, callback) {
@@ -30,6 +45,7 @@ function publicLookup(hostname, options, callback) {
 const REASONS = {
   ENOTFOUND: 'nome non trovato nel DNS',
   ENODATA: 'nessun record DNS',
+  EAI_AGAIN: 'DNS non raggiungibile',
   ECONNREFUSED: 'connessione rifiutata',
   ECONNRESET: 'connessione interrotta',
   ETIMEDOUT: 'tempo scaduto',
@@ -41,8 +57,7 @@ const REASONS = {
   UNABLE_TO_VERIFY_LEAF_SIGNATURE: 'certificato non verificabile',
 };
 
-/** Resolves to { code, error }: code is the HTTP status (0 when no response), error a short reason. */
-function probe(domain, { timeout = 10000, path = '/login', lookup = publicLookup, port = 443, ca } = {}) {
+function httpsGet(domain, { connectHost, port = 443, path = '/login', lookup = publicLookup, timeout = 10000, ca } = {}) {
   return new Promise((resolve) => {
     let done = false;
     const finish = (r) => {
@@ -51,7 +66,18 @@ function probe(domain, { timeout = 10000, path = '/login', lookup = publicLookup
         resolve(r);
       }
     };
-    const req = https.request({ host: domain, port, ca, servername: domain, path, method: 'GET', lookup, timeout, headers: { 'User-Agent': 'zerodark-console-health' } }, (res) => {
+    const opts = {
+      host: connectHost || domain,
+      port,
+      ca,
+      servername: domain, // SNI + certificate check against the portal name, whatever we connect to
+      path,
+      method: 'GET',
+      timeout,
+      headers: { Host: domain, 'User-Agent': 'zerodark-console-health' },
+    };
+    if (!connectHost) opts.lookup = lookup;
+    const req = https.request(opts, (res) => {
       res.resume();
       finish({ code: res.statusCode, error: res.statusCode === 200 ? null : `${path} risponde ${res.statusCode}` });
     });
@@ -64,4 +90,24 @@ function probe(domain, { timeout = 10000, path = '/login', lookup = publicLookup
   });
 }
 
-module.exports = { probe, publicLookup };
+/**
+ * Resolves to { code, error }: code is the HTTP status (0 when there was no answer), error a short reason.
+ * opts.referenceHost: a name known to point to this machine (the console's own domain).
+ * opts.connectHost:   reverse proxy reachable on the internal network (e.g. "zd-proxy").
+ */
+async function probe(domain, opts = {}) {
+  const resolve4 = opts.resolve4 || publicResolve4;
+  if (opts.referenceHost) {
+    const [mine, here] = await Promise.all([resolve4(domain), resolve4(opts.referenceHost)]);
+    if (mine && here) {
+      if (!mine.length) return { code: 0, error: 'nome non trovato nel DNS' };
+      if (here.length && !mine.some((ip) => here.includes(ip))) {
+        return { code: 0, error: `il DNS punta a ${mine.join(', ')}, non a questo server (${here.join(', ')})` };
+      }
+    }
+    // public resolvers unreachable: skip the DNS step, the HTTPS step still says something useful
+  }
+  return httpsGet(domain, opts);
+}
+
+module.exports = { probe, publicLookup, publicResolve4 };
