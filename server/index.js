@@ -714,9 +714,18 @@ route('GET', '/agent/zdt-agent.py', (req, p, q, res) => {
 // Static files
 // ---------------------------------------------------------------------------
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.png': 'image/png' };
+// index.html links its scripts and styles with ?v=<version>-<commit>: a new release is picked up
+// by the browser immediately instead of after the cache expires.
+const ASSET_VERSION = encodeURIComponent(`${VERSION}-${(BUILD.commit || 'dev').slice(0, 7)}`);
+let indexHtml = null;
 function serveStatic(req, res, pathname) {
   let file = path.normalize(path.join(PUBLIC_DIR, pathname));
   if (!file.startsWith(PUBLIC_DIR) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) file = path.join(PUBLIC_DIR, 'index.html');
+  if (file.endsWith('index.html')) {
+    indexHtml ||= fs.readFileSync(file, 'utf8').replace(/(src|href)="\/([\w.-]+\.(?:js|css))"/g, `$1="/$2?v=${ASSET_VERSION}"`);
+    res.writeHead(200, { 'Content-Type': MIME['.html'], 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'same-origin', 'X-Frame-Options': 'DENY' });
+    return res.end(indexHtml);
+  }
   res.writeHead(200, {
     'Content-Type': MIME[path.extname(file)] || 'application/octet-stream',
     'Cache-Control': file.endsWith('index.html') ? 'no-cache' : 'public, max-age=300',
@@ -764,7 +773,7 @@ async function checkAppHealth(appId, { force = false } = {}) {
     connectHost: cfg.proxyHost || undefined,
     referenceHost: cfg.publicUrl ? new URL(cfg.publicUrl).hostname : undefined,
   });
-  db.prepare('UPDATE apps SET health = ?, health_code = ?, health_error = ?, health_at = ? WHERE id = ?').run(code === 200 ? 'ok' : 'down', code, error, now(), app.id);
+  db.prepare('UPDATE apps SET health = ?, health_code = ?, health_error = ?, health_at = ? WHERE id = ?').run(error ? 'down' : 'ok', code, error, now(), app.id);
   return db.prepare('SELECT health, health_code, health_error, health_at FROM apps WHERE id = ?').get(app.id);
 }
 // Healthy portals every HEALTH_INTERVAL; portals that are down (typically waiting for DNS or

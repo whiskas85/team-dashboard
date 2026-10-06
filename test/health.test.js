@@ -23,7 +23,7 @@ test('probe: 200, other status, TLS without certificate, DNS failure', async (t)
     '-addext', 'subjectAltName=DNS:demo.zerodarkteam.it', '-keyout', path.join(dir, 'k.pem'), '-out', path.join(dir, 'c.pem')], { stdio: 'ignore' });
   const cert = fs.readFileSync(path.join(dir, 'c.pem'));
   const srv = https.createServer({ key: fs.readFileSync(path.join(dir, 'k.pem')), cert }, (req, res) => {
-    res.statusCode = req.url === '/login' ? 200 : 404;
+    res.statusCode = req.url === '/login' ? 200 : req.url === '/protetto' ? 401 : 404;
     res.end('ok');
   });
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
@@ -31,6 +31,7 @@ test('probe: 200, other status, TLS without certificate, DNS failure', async (t)
   const port = srv.address().port;
 
   assert.deepEqual(await probe('demo.zerodarkteam.it', { lookup: local, port, ca: cert }), { code: 200, error: null });
+  assert.deepEqual(await probe('demo.zerodarkteam.it', { lookup: local, port, ca: cert, path: '/protetto' }), { code: 401, error: null }, '401 = up behind a password');
   const other = await probe('demo.zerodarkteam.it', { lookup: local, port, ca: cert, path: '/nope' });
   assert.equal(other.code, 404);
 

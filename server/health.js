@@ -79,7 +79,9 @@ function httpsGet(domain, { connectHost, port = 443, path = '/login', lookup = p
     if (!connectHost) opts.lookup = lookup;
     const req = https.request(opts, (res) => {
       res.resume();
-      finish({ code: res.statusCode, error: res.statusCode === 200 ? null : `${path} risponde ${res.statusCode}` });
+      // 401: the site answers but sits behind a password (e.g. basic auth on test environments)
+      const up = res.statusCode === 200 || res.statusCode === 401;
+      finish({ code: res.statusCode, error: up ? null : `${path} risponde ${res.statusCode}` });
     });
     req.on('timeout', () => req.destroy(Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' })));
     req.on('error', (e) => {
