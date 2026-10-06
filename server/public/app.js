@@ -377,7 +377,9 @@ function healthBadge(a) {
   else if (a.health === 'ok') b = `<span title="/login risponde 200${esc(when)}">${badge('ok', 'Sito raggiungibile')}</span>`;
   else b = `<span title="${esc((a.health_error || 'non raggiungibile') + when)}">${badge('critical', a.health_code ? `Sito: errore ${a.health_code}` : 'Sito non raggiungibile')}</span>`;
   const why = a.health === 'down' && a.health_error ? `<div class="muted" style="font-size:12px;max-width:260px">${esc(a.health_error)}</div>` : '';
-  return `<div class="row" style="gap:6px;margin-top:4px">${b}<button class="small" data-health="${a.id}" title="Ricontrolla adesso">Verifica ora</button></div>${why}`;
+  // "Verifica ora" only while there is something to wait for: a healthy site needs no button.
+  const retry = a.health === 'ok' ? '' : `<button class="small" data-health="${a.id}" title="Ricontrolla adesso">Verifica ora</button>`;
+  return `<div class="row" style="gap:6px;margin-top:4px">${b}${retry}</div>${why}`;
 }
 
 async function showApp(app) {
