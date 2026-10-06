@@ -3,3 +3,4 @@ data/
 *.db
 *.db-*
 .env
+server/build.json

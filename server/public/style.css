@@ -235,3 +235,9 @@ body.role-viewer .admin-only { display: none !important; }
   .topbar .nav { order: 10; width: 100%; overflow-x: auto; }
   .topbar .nav a { white-space: nowrap; }
 }
+
+/* Version badge */
+.version-badge { display: inline-flex; align-items: stretch; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; font: 11.5px/1 var(--mono); color: var(--ink-2); white-space: nowrap; }
+.version-badge:hover { text-decoration: none; border-color: var(--axis); }
+.version-badge .v { background: var(--accent); color: var(--accent-ink); padding: 4px 6px; font-weight: 600; }
+.version-badge .sha { padding: 4px 6px; background: var(--surface-2); }
