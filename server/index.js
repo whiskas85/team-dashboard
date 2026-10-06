@@ -231,7 +231,7 @@ function latestServerMetrics(serverId) {
 
 function serverSummary(s) {
   const m = latestServerMetrics(s.id);
-  const apps = db.prepare('SELECT COUNT(*) n FROM apps WHERE server_id = ?').get(s.id).n;
+  const apps = db.prepare(`SELECT COUNT(*) n FROM apps WHERE server_id = ? AND status NOT IN ${ARCHIVED}`).get(s.id).n;
   return {
     id: s.id,
     name: s.name,
@@ -250,8 +250,14 @@ function serverSummary(s) {
   };
 }
 
+// Archived apps (and those being purged) live in the Archive, not with the running ones.
+const ARCHIVED = "('archived', 'purging')";
+
 function appRows(serverId) {
-  const apps = db.prepare('SELECT * FROM apps WHERE server_id = ? ORDER BY name').all(serverId);
+  return decorateApps(db.prepare(`SELECT * FROM apps WHERE server_id = ? AND status NOT IN ${ARCHIVED} ORDER BY name`).all(serverId));
+}
+
+function decorateApps(apps) {
   const since = now() - 86400;
   return apps.map((a) => {
     const last = db.prepare('SELECT ts, cpu_pct, mem_mb, procs FROM app_metrics WHERE app_id = ? ORDER BY ts DESC LIMIT 1').get(a.id);
@@ -281,7 +287,7 @@ function analysisInput(days) {
   const blank = () => new Array(T).fill(null);
 
   const servers = db.prepare('SELECT * FROM servers ORDER BY name').all();
-  const apps = db.prepare("SELECT * FROM apps WHERE status != 'removing' ORDER BY name").all();
+  const apps = db.prepare(`SELECT * FROM apps WHERE status != 'removing' AND status NOT IN ${ARCHIVED} ORDER BY name`).all();
   const serverSeries = {};
   for (const r of db
     .prepare(
@@ -424,8 +430,14 @@ function ackTask(server, id, body) {
       // gestionale picked its own password and the console must not show one.
       if (ok && credentials.status(task.app_id)) credentials.setStatus(task.app_id, patch.admin_password === 'applied' ? 'applied' : 'unsupported');
     } else if (task.action === 'remove_app') {
+      // The portal is now in /opt/archivio (data volumes kept): it moves to the console's Archive.
+      if (ok) {
+        const archivePath = ((msg || '').match(/\/opt\/archivio\/[^\s"'`]+/) || [null])[0];
+        db.prepare("UPDATE apps SET status = 'archived', status_msg = ?, archived_at = ?, archive_path = COALESCE(?, archive_path), health = NULL, health_code = NULL, health_error = NULL, health_at = NULL WHERE id = ?").run(msg, now(), archivePath, task.app_id);
+      } else db.prepare("UPDATE apps SET status = 'error', status_msg = ? WHERE id = ?").run(msg, task.app_id);
+    } else if (task.action === 'purge_app') {
       if (ok) db.prepare('DELETE FROM apps WHERE id = ?').run(task.app_id);
-      else db.prepare("UPDATE apps SET status = 'error', status_msg = ? WHERE id = ?").run(msg, task.app_id);
+      else db.prepare("UPDATE apps SET status = 'archived', status_msg = ? WHERE id = ?").run(msg, task.app_id);
     }
   });
   return { ok: true };
@@ -603,7 +615,8 @@ route('POST', '/api/servers/:id/apps', async (req, p) => {
   if (email && !EMAIL_RE.test(email)) throw new HttpError(400, 'Email non valida');
   const port = num(body.port);
   if (port !== null && (port < 1 || port > 65535 || !Number.isInteger(port))) throw new HttpError(400, 'Porta non valida');
-  if (db.prepare('SELECT 1 FROM apps WHERE server_id = ? AND name = ?').get(server.id, name)) throw new HttpError(409, 'App già presente su questo server');
+  const existing = db.prepare('SELECT status FROM apps WHERE server_id = ? AND name = ?').get(server.id, name);
+  if (existing) throw new HttpError(409, existing.status === 'archived' ? `"${name}" è nell'archivio: eliminalo definitivamente prima di riusare il nome` : 'App già presente su questo server');
   // Portals: containers zd-sq-<name>-{db,app,whatsapp}, monitored as one app from the start.
   const kind = type === 'portal' ? 'docker' : oneOf(body.kind, ['process', 'docker', 'systemd'], 'docker');
   const match = type === 'portal' ? `^zd-sq-${name}-` : str(body.match, 200) || name;
@@ -628,15 +641,16 @@ route('POST', '/api/servers/:id/apps', async (req, p) => {
   return { id, status: provision ? 'pending' : 'active' };
 });
 route('DELETE', '/api/apps/:id', (req, p, q) => {
-  requireAdmin(req);
+  const me = requireAdmin(req);
   const app = db.prepare('SELECT * FROM apps WHERE id = ?').get(p.id);
   if (!app) throw new HttpError(404, 'App non trovata');
   if (q.get('deprovision') === '1') {
     // Only what the console created: never run remove_app on production or on apps found by the agent.
     if (!app.provisioned) throw new HttpError(400, `"${app.name}" non è stata creata dalla console: si può solo smettere di monitorarla`);
+    if (q.get('confirm') !== app.name) throw new HttpError(400, `Per confermare scrivi il nome esatto: ${app.name}`);
     const t = now();
     tx(db, () => {
-      db.prepare("UPDATE apps SET status = 'removing' WHERE id = ?").run(app.id);
+      db.prepare("UPDATE apps SET status = 'removing', archived_by = ? WHERE id = ?").run(me.username, app.id);
       db.prepare("INSERT INTO tasks (server_id, app_id, action, payload, status, created_at, updated_at) VALUES (?, ?, 'remove_app', ?, 'queued', ?, ?)").run(
         app.server_id, app.id, JSON.stringify({ name: app.name, type: app.type, kind: app.kind, match: app.match, domain: app.domain, port: app.port, template: app.template }), t, t
       );
@@ -646,6 +660,38 @@ route('DELETE', '/api/apps/:id', (req, p, q) => {
   db.prepare('DELETE FROM apps WHERE id = ?').run(app.id);
   invalidateAnalysis();
   return { status: 'deleted' };
+});
+// All apps across servers: running ones (view=all|portals) or the Archive (view=archive).
+route('GET', '/api/apps', (req, p, q) => {
+  requireUser(req);
+  const view = q.get('view') || 'all';
+  let where = `a.status NOT IN ${ARCHIVED}`;
+  if (view === 'portals') where += " AND a.type = 'portal'";
+  if (view === 'archive') where = `a.status IN ${ARCHIVED}`;
+  const rows = db.prepare(`SELECT a.*, s.name AS server_name FROM apps a JOIN servers s ON s.id = a.server_id WHERE ${where} ORDER BY ${view === 'archive' ? 'a.archived_at DESC' : 'a.name'}`).all();
+  return decorateApps(rows);
+});
+// Archive -> gone for good: purge_app deletes the data volumes and the archived folder on the server.
+route('POST', '/api/apps/:id/purge', async (req, p) => {
+  requireAdmin(req);
+  const app = db.prepare('SELECT * FROM apps WHERE id = ?').get(p.id);
+  if (!app) throw new HttpError(404, 'App non trovata');
+  if (app.status !== 'archived') throw new HttpError(400, "Si può eliminare definitivamente solo un'app nell'archivio");
+  const body = await readBody(req);
+  if (body.confirm !== app.name) throw new HttpError(400, `Per confermare scrivi il nome esatto: ${app.name}`);
+  if (!app.provisioned) {
+    // never created by the console: nothing to delete on the server, just forget it
+    db.prepare('DELETE FROM apps WHERE id = ?').run(app.id);
+    return { status: 'deleted' };
+  }
+  const t = now();
+  tx(db, () => {
+    db.prepare("UPDATE apps SET status = 'purging' WHERE id = ?").run(app.id);
+    db.prepare("INSERT INTO tasks (server_id, app_id, action, payload, status, created_at, updated_at) VALUES (?, ?, 'purge_app', ?, 'queued', ?, ?)").run(
+      app.server_id, app.id, JSON.stringify({ name: app.name, type: app.type, kind: app.kind, domain: app.domain, archive_path: app.archive_path }), t, t
+    );
+  });
+  return { status: 'purging' };
 });
 // Edit how an app is shown and checked: type, domain, monitoring rule. Nothing changes on the server.
 route('PATCH', '/api/apps/:id', async (req, p) => {

@@ -140,6 +140,12 @@ Contratto per `create_app`: usare `ZDT_APP_ADMIN_PASSWORD`, se presente, come pa
 
 In console, sotto il portale, **Accesso iniziale** (a scomparsa, solo amministratori; ogni visualizzazione viene registrata) mostra indirizzo, utente e password con *Mostra*, *Copia password* e *Copia messaggio per il cliente*.
 
+#### Rimozione, archivio ed eliminazione definitiva
+
+- **Rimuovi → Archivia** (solo portali creati dalla console, scrivendo il nome per conferma): esegue `remove_app` (`squadra-server.sh rimuovi`: backup finale, container tolti, sito staccato, cartella in `/opt/archivio`, volumi conservati). Il portale passa nella scheda **Archivio**, con la cartella letta dall'output dello script.
+- **Archivio → Elimina definitivamente** (nome da riscrivere): esegue l'hook `purge_app` con `ZDT_APP_NAME` e `ZDT_APP_ARCHIVE_PATH`. Contratto: cancellare i volumi `gestionale-sq-<nome>_*` e la cartella archiviata, rifiutare i nomi riservati (`ops`, `test*`, `www`), uscire con 0 solo se ha cancellato tutto. Se l'hook manca o fallisce, il portale resta nell'archivio e niente viene toccato.
+- Le app non create dalla console si possono solo smettere di monitorare.
+
 ### Creazione app (hook)
 
 Quando crei un'app dalla console con *Crea l'app sul server* attivo, l'agent esegue `/etc/zdt-agent/hooks/create_app`
