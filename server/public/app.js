@@ -114,9 +114,22 @@ function versionBadge() {
     : `<span class="version-badge" title="${esc(title)}">${inner}</span>`;
 }
 
-function setRefresh(fn, ms = 60000) {
+// Auto-refresh every `ms`; while `fast()` is true (an app is being archived, deleted or created by
+// the agent) refresh every few seconds, so the change shows up without reloading the page.
+const BUSY = ['pending', 'provisioning', 'removing', 'purging'];
+const anyBusy = (apps) => apps.some((a) => BUSY.includes(a.status));
+function setRefresh(fn, ms = 60000, fast = null) {
   clearInterval(state.timer);
-  state.timer = fn ? setInterval(() => document.visibilityState === 'visible' && fn(), ms) : null;
+  if (!fn) { state.timer = null; return; }
+  let last = Date.now();
+  let running = false;
+  state.timer = setInterval(async () => {
+    if (running || document.visibilityState !== 'visible') return;
+    if (Date.now() - last < ms && !(fast && fast())) return;
+    running = true;
+    last = Date.now();
+    try { await fn(); } catch { /* next tick retries */ } finally { running = false; }
+  }, 3000);
 }
 
 // ---------------------------------------------------------------------------
@@ -251,8 +264,10 @@ function installModal(r, title) {
 // ---------------------------------------------------------------------------
 async function renderServer(id) {
   const main = shell('servers', '<div class="loading">Caricamento…</div>');
+  let busy = false;
   const load = async () => {
     const [s, metrics, analysis] = await Promise.all([api(`/api/servers/${id}`), api(`/api/servers/${id}/metrics?range=${state.range}`), api('/api/analysis?days=7&n=1').catch(() => null)]);
+    busy = anyBusy(s.apps);
     const report = analysis?.servers.find((x) => x.id === s.id);
     const m = s.latest || {};
     const extra = m.extra || {};
@@ -355,7 +370,7 @@ async function renderServer(id) {
     if (sel) { main.querySelector(`[data-app="${sel.id}"]`)?.classList.add('selected'); showApp(sel); }
   };
   await load();
-  setRefresh(load);
+  setRefresh(load, 60000, () => busy);
 }
 
 const rangeSeg = () => `<div class="seg" role="group" aria-label="Periodo">${['1h', '6h', '24h', '7d', '30d'].map((r) => `<button data-range="${r}" class="${state.range === r ? 'on' : ''}">${r.replace('d', 'g')}</button>`).join('')}</div>`;
@@ -681,8 +696,10 @@ const appActions = (a) => `<div class="row actions">
 
 async function renderPortals() {
   const main = shell('servers', '<div class="loading">Caricamento…</div>');
+  let busy = false;
   const load = async () => {
     const apps = await api('/api/apps?view=portals');
+    busy = anyBusy(apps);
     main.innerHTML = `${homeTabs('portals')}
       <div class="page-head"><div><h1>Portali</h1><p>${apps.length} portali attivi · per crearne uno: apri un server → <b>+ Nuova app</b></p></div></div>
       ${!apps.length ? '<div class="card empty-state"><p>Nessun portale. Apri un server e usa <b>+ Nuova app → Portale</b>.</p></div>' : `
@@ -703,13 +720,15 @@ async function renderPortals() {
     wireAppActions(main, apps, load);
   };
   await load();
-  setRefresh(load);
+  setRefresh(load, 60000, () => busy);
 }
 
 async function renderAllApps() {
   const main = shell('servers', '<div class="loading">Caricamento…</div>');
+  let busy = false;
   const load = async () => {
     const apps = await api('/api/apps?view=all');
+    busy = anyBusy(apps);
     main.innerHTML = `${homeTabs('apps')}
       <div class="page-head"><div><h1>App ospitate</h1><p>${apps.length} app su tutti i server · clicca per aprire il server</p></div></div>
       ${!apps.length ? '<div class="card empty-state"><p>Nessuna app monitorata.</p></div>' : `
@@ -732,13 +751,15 @@ async function renderAllApps() {
     wireAppActions(main, apps, load);
   };
   await load();
-  setRefresh(load);
+  setRefresh(load, 60000, () => busy);
 }
 
 async function renderArchive() {
   const main = shell('servers', '<div class="loading">Caricamento…</div>');
+  let busy = false;
   const load = async () => {
     const apps = await api('/api/apps?view=archive');
+    busy = anyBusy(apps);
     const when = (a) => (a.archived_at ? `${esc(fmt.dateTime(a.archived_at))}${a.archived_by ? ` · ${esc(a.archived_by)}` : ''}` : '–');
     const note = (a) => (a.status === 'archived' && a.status_msg && /errore|fallit|non /i.test(a.status_msg) ? `<div class="err" style="font-size:12px">${esc(a.status_msg.slice(-200))}</div>` : '');
     const purge = (a) => {
@@ -770,7 +791,7 @@ async function renderArchive() {
     }));
   };
   await load();
-  setRefresh(load);
+  setRefresh(load, 60000, () => busy);
 }
 
 // ---------------------------------------------------------------------------
