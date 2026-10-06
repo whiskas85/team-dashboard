@@ -94,6 +94,7 @@ const MIGRATIONS = [
   ['apps', 'health', 'TEXT'],        // ok | down
   ['apps', 'health_code', 'INTEGER'], // HTTP status (0 = unreachable)
   ['apps', 'health_at', 'INTEGER'],
+  ['apps', 'health_error', 'TEXT'],   // short human-readable reason when down
 ];
 
 function open(file) {

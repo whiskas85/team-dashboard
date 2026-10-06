@@ -1,6 +1,6 @@
 {
   "name": "zerodark-console",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "Console leggera per monitorare server e app (OPS), con analisi di capacità e combinazioni ideali di distribuzione.",
   "main": "server/index.js",

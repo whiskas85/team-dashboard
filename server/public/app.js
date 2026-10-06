@@ -326,6 +326,12 @@ async function renderServer(id) {
       main.querySelectorAll('[data-app]').forEach((x) => x.classList.toggle('selected', x === tr));
       showApp(s.apps.find((a) => a.id === state.selectedApp));
     }));
+    main.querySelectorAll('[data-health]').forEach((b) => (b.onclick = async () => {
+      b.disabled = true;
+      b.textContent = 'Verifico…';
+      try { await api(`/api/apps/${b.dataset.health}/health`, { method: 'POST' }); } catch (e) { alert(e.message); }
+      load();
+    }));
     main.querySelectorAll('[data-del-app]').forEach((b) => (b.onclick = async () => {
       const app = s.apps.find((a) => a.id === Number(b.dataset.delApp));
       const what = app.type === 'portal' ? 'Fa un backup finale, ferma i container, stacca il sito e archivia la cartella in /opt/archivio. I volumi restano.' : "Esegue lo script remove_app sul server.";
@@ -366,10 +372,12 @@ function appsTable(apps) {
 function healthBadge(a) {
   if (a.type !== 'portal' || a.status !== 'active' || !a.domain) return '';
   const when = a.health_at ? ` · verificato ${ago(a.health_at)}` : '';
-  if (!a.health) return `<div>${badge('pending', 'Sito: in verifica')}</div>`;
-  if (a.health === 'ok') return `<div title="/login risponde 200${esc(when)}">${badge('ok', 'Sito raggiungibile')}</div>`;
-  const why = a.health_code ? `risponde ${a.health_code}` : 'non raggiungibile (DNS o certificato non ancora pronti?)';
-  return `<div title="/login ${esc(why)}${esc(when)}">${badge('critical', a.health_code ? `Sito: errore ${a.health_code}` : 'Sito non raggiungibile')}</div>`;
+  let b;
+  if (!a.health) b = badge('pending', 'Sito: in verifica');
+  else if (a.health === 'ok') b = `<span title="/login risponde 200${esc(when)}">${badge('ok', 'Sito raggiungibile')}</span>`;
+  else b = `<span title="${esc((a.health_error || 'non raggiungibile') + when)}">${badge('critical', a.health_code ? `Sito: errore ${a.health_code}` : 'Sito non raggiungibile')}</span>`;
+  const why = a.health === 'down' && a.health_error ? `<div class="muted" style="font-size:12px;max-width:260px">${esc(a.health_error)}</div>` : '';
+  return `<div class="row" style="gap:6px;margin-top:4px">${b}<button class="small" data-health="${a.id}" title="Ricontrolla adesso">Verifica ora</button></div>${why}`;
 }
 
 async function showApp(app) {

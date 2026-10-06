@@ -9,6 +9,7 @@ const crypto = require('node:crypto');
 const { open, purge, tx } = require('./db');
 const { analyze } = require('./analytics');
 const { Users, ROLES, sessionCookie, sessionUser, publicUser } = require('./auth');
+const { probe } = require('./health');
 
 const VERSION = require('../package.json').version;
 // Written by the deploy workflow (commit, date, run); absent on manual installs.
@@ -626,6 +627,13 @@ route('DELETE', '/api/apps/:id', (req, p, q) => {
   invalidateAnalysis();
   return { status: 'deleted' };
 });
+// "Verifica ora": any signed-in user may re-run the reachability check of a portal.
+route('POST', '/api/apps/:id/health', async (req, p) => {
+  requireUser(req);
+  const r = await checkAppHealth(Number(p.id), { force: true });
+  if (!r) throw new HttpError(400, 'Controllo disponibile solo per portali attivi con un dominio');
+  return r;
+});
 route('GET', '/api/apps/:id/metrics', (req, p, q) => {
   requireUser(req);
   const r = rangeParams(q);
@@ -718,22 +726,22 @@ const server = http.createServer(async (req, res) => {
 // Portal health: https://<domain>/login must answer 200
 // ---------------------------------------------------------------------------
 let healthEnabled = false;
-async function checkAppHealth(appId) {
-  if (!healthEnabled) return;
+async function checkAppHealth(appId, { force = false } = {}) {
+  if (!healthEnabled && !force) return null;
   const app = db.prepare("SELECT id, domain FROM apps WHERE id = ? AND type = 'portal' AND status = 'active' AND domain IS NOT NULL").get(appId);
-  if (!app) return;
-  let code = 0;
-  try {
-    const res = await fetch(`https://${app.domain}/login`, { redirect: 'manual', signal: AbortSignal.timeout(10000) });
-    code = res.status;
-  } catch {
-    code = 0; // DNS not ready, TLS not issued yet, connection refused...
-  }
-  db.prepare('UPDATE apps SET health = ?, health_code = ?, health_at = ? WHERE id = ?').run(code === 200 ? 'ok' : 'down', code, now(), app.id);
+  if (!app) return null;
+  const { code, error } = await probe(app.domain);
+  db.prepare('UPDATE apps SET health = ?, health_code = ?, health_error = ?, health_at = ? WHERE id = ?').run(code === 200 ? 'ok' : 'down', code, error, now(), app.id);
+  return db.prepare('SELECT health, health_code, health_error, health_at FROM apps WHERE id = ?').get(app.id);
 }
+// Healthy portals every HEALTH_INTERVAL; portals that are down (typically waiting for DNS or
+// for the certificate) every minute, so the badge turns green soon after the site comes up.
 async function checkAllHealth() {
-  const ids = db.prepare("SELECT id FROM apps WHERE type = 'portal' AND status = 'active' AND domain IS NOT NULL").all();
-  for (const { id } of ids) await checkAppHealth(id);
+  const t = now();
+  const due = db
+    .prepare("SELECT id FROM apps WHERE type = 'portal' AND status = 'active' AND domain IS NOT NULL AND (health_at IS NULL OR health_at <= ? OR (health IS NOT 'ok' AND health_at <= ?))")
+    .all(t - cfg.healthInterval + 5, t - 55);
+  for (const { id } of due) await checkAppHealth(id);
 }
 
 function housekeeping() {
@@ -751,7 +759,7 @@ if (require.main === module) {
   if (cfg.healthInterval > 0) {
     healthEnabled = true;
     setTimeout(checkAllHealth, 5000).unref();
-    setInterval(checkAllHealth, cfg.healthInterval * 1000).unref();
+    setInterval(checkAllHealth, 60 * 1000).unref();
   }
   server.listen(cfg.port, cfg.host, () => console.log(`[console] v${VERSION}${BUILD.commit ? ` (${BUILD.commit.slice(0, 7)})` : ''} in ascolto su http://${cfg.host}:${cfg.port} (retention ${cfg.retentionDays} giorni)`));
   const stop = () => server.close(() => process.exit(0));
