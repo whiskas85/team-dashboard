@@ -423,7 +423,7 @@ function credentialsBody(a) {
   else if (c.status === 'resetting') body = '<p class="muted">Nuova password in preparazione: il server la imposta entro un paio di minuti. Questa pagina si aggiorna da sola.</p>';
   else if (c.status === 'none') body = `<p class="muted">La console non conosce la password di questo portale.</p>${renew('Genera una nuova password')}`;
   else if (c.status === 'unsupported') body = `<p class="muted">Lo script del gestionale ha scelto una sua password, quindi la console non la conosce. Generane una nuova: la imposta il server e la trovi qui, pronta da consegnare.</p>${renew('Genera una nuova password')}`;
-  else if (c.status === 'failed') body = `<p class="err">Il server non ha potuto impostare la nuova password${c.error ? `: ${esc(c.error)}` : ''}.</p><p class="muted">Resta valida la password precedente. Serve l'hook <code>set_admin_password</code> del gestionale sul server.</p>${renew('Riprova')}`;
+  else if (c.status === 'failed') body = `<p class="err">Il server non ha potuto impostare la nuova password${c.error ? `: ${esc(c.error)}` : ''}.</p><p class="muted">Resta valida la password precedente.${/non installato/i.test(c.error || '') ? ' Serve l\'hook <code>set_admin_password</code> del gestionale sul server.' : /manca la password/i.test(c.error || '') ? ' L\'agent sul server è di una versione che non passa la password agli script: reinstallalo dal dettaglio server con «Installa agent».' : ''}</p>${renew('Riprova')}`;
   else body = `<div class="cred-body" data-cred-body><p class="muted">Caricamento…</p></div>${renew('Genera una nuova password')}`;
   return body;
 }

@@ -142,6 +142,9 @@ test('portal creation contract', async () => {
 
   // New first-access password for a squad portal whose password the console does not know
   assert.equal((await call('POST', `/api/apps/${test9.id}/credentials/reset`)).status, 400, 'only squad portals');
+  await call('POST', '/api/agent/report', { agent_version: '0.1.2', samples: [] }, auth);
+  assert.match((await call('POST', `/api/apps/${verdi.id}/credentials/reset`)).body.error, /Installa agent/, 'old agents drop the password');
+  await call('POST', '/api/agent/report', { agent_version: '0.1.3', samples: [] }, auth);
   assert.equal((await call('POST', `/api/apps/${verdi.id}/credentials/reset`)).body.status, 'resetting');
   assert.equal((await call('POST', `/api/apps/${verdi.id}/credentials/reset`)).status, 409, 'one at a time');
   const nextReset = async () => (await call('POST', '/api/agent/report', { samples: [] }, auth)).body.tasks.find((t) => t.action === 'set_admin_password');
