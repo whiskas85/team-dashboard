@@ -9,7 +9,8 @@ const crypto = require('node:crypto');
 const { open, purge, tx, markSquadPortals } = require('./db');
 const { analyze } = require('./analytics');
 const { Users, ROLES, sessionCookie, sessionUser, publicUser } = require('./auth');
-const { probe } = require('./health');
+const { probe, fetchVersion } = require('./health');
+const { Updates, serverVersions } = require('./updates');
 const { Credentials, keyFrom } = require('./credentials');
 
 const VERSION = require('../package.json').version;
@@ -39,6 +40,11 @@ const cfg = {
   healthInterval: Number(process.env.HEALTH_INTERVAL ?? 300),
   // Reverse proxy reachable on the internal Docker network: portal checks go through it directly.
   proxyHost: process.env.PROXY_HOST || '',
+  // Gestionale updates: nightly automatic updates at UPDATE_HOUR (TIME_ZONE), versions asked every VERSIONS_INTERVAL s.
+  updateHour: Number(process.env.UPDATE_HOUR ?? 4),
+  timeZone: process.env.TIME_ZONE || 'Europe/Rome',
+  versionsInterval: Number(process.env.VERSIONS_INTERVAL || 6 * 3600),
+  releasesUrl: process.env.RELEASES_URL || 'https://github.com/whiskas85/team-management/releases/tag/v',
 };
 
 const db = open(cfg.dbFile);
@@ -58,6 +64,7 @@ function setting(key, init) {
 const SESSION_SECRET = setting('session_secret', () => crypto.randomBytes(32).toString('hex'));
 const users = new Users(db);
 const credentials = new Credentials(db, keyFrom(process.env.CREDENTIALS_KEY, SESSION_SECRET));
+const updates = new Updates(db, { now: () => now(), tx, interval: cfg.versionsInterval, hour: cfg.updateHour, timeZone: cfg.timeZone });
 if (!users.count()) {
   let pw = cfg.adminPassword;
   if (!pw) {
@@ -260,6 +267,11 @@ function appRows(serverId) {
 
 function decorateApps(apps) {
   const since = now() - 86400;
+  const servers = new Map();
+  const serverOf = (id) => {
+    if (!servers.has(id)) servers.set(id, db.prepare('SELECT * FROM servers WHERE id = ?').get(id));
+    return servers.get(id);
+  };
   return apps.map((a) => {
     const last = db.prepare('SELECT ts, cpu_pct, mem_mb, procs FROM app_metrics WHERE app_id = ? ORDER BY ts DESC LIMIT 1').get(a.id);
     const day = db.prepare('SELECT AVG(cpu_pct) cpu_avg, MAX(cpu_pct) cpu_max, AVG(mem_mb) mem_avg, MAX(mem_mb) mem_max FROM app_metrics WHERE app_id = ? AND ts >= ?').get(a.id, since);
@@ -267,7 +279,7 @@ function decorateApps(apps) {
     const credError = cred && cred.status === 'failed'
       ? db.prepare("SELECT message FROM tasks WHERE app_id = ? AND action = 'set_admin_password' ORDER BY id DESC LIMIT 1").get(a.id)?.message
       : undefined;
-    return { ...a, latest: last || null, last24h: day, credentials: cred && { status: cred.status, username: cred.username, revealed_at: cred.revealed_at, revealed_by: cred.revealed_by, error: credError } };
+    return { ...a, latest: last || null, last24h: day, credentials: cred && { status: cred.status, username: cred.username, revealed_at: cred.revealed_at, revealed_by: cred.revealed_by, error: credError }, update: updates.decorate(a, serverOf(a.server_id)) };
   });
 }
 
@@ -394,9 +406,17 @@ function agentConfig(server) {
     .prepare("SELECT name, kind, match, type, domain, port FROM apps WHERE server_id = ? AND status IN ('active', 'provisioning')")
     .all(server.id);
   // Re-deliver tasks that were sent but never acknowledged (agent restart, network error...).
-  const tasks = db
-    .prepare("SELECT id, app_id, action, payload FROM tasks WHERE server_id = ? AND (status = 'queued' OR (status = 'sent' AND updated_at < ?)) ORDER BY id")
+  let tasks = db
+    .prepare("SELECT id, app_id, action, payload, status FROM tasks WHERE server_id = ? AND (status = 'queued' OR (status = 'sent' AND updated_at < ?)) ORDER BY id")
     .all(server.id, now() - 600);
+  // One gestionale update at a time per server: each one restarts containers and runs a backup.
+  let updating = !!db.prepare("SELECT 1 FROM tasks WHERE server_id = ? AND action = 'update_app' AND status = 'sent' AND updated_at >= ?").get(server.id, now() - 600);
+  tasks = tasks.filter((t) => {
+    if (t.action !== 'update_app') return true;
+    if (updating) return false;
+    updating = true;
+    return true;
+  });
   const mark = db.prepare("UPDATE tasks SET status = 'sent', updated_at = ? WHERE id = ?");
   const prov = db.prepare("UPDATE apps SET status = 'provisioning' WHERE id = (SELECT app_id FROM tasks WHERE id = ?) AND status = 'pending'");
   for (const t of tasks) {
@@ -424,7 +444,12 @@ function ackTask(server, id, body) {
   const ok = body.status === 'done';
   const msg = str(body.message, 2000);
   tx(db, () => {
-    db.prepare('UPDATE tasks SET status = ?, message = ?, updated_at = ? WHERE id = ?').run(ok ? 'done' : 'failed', msg, now(), id);
+    db.prepare('UPDATE tasks SET status = ?, message = ?, result = ?, updated_at = ? WHERE id = ?').run(ok ? 'done' : 'failed', msg, body.app && typeof body.app === 'object' ? JSON.stringify(body.app).slice(0, 4000) : null, now(), id);
+    if (task.action === 'list_versions' || task.action === 'update_app') {
+      updates.ack(task, ok, body.app && typeof body.app === 'object' ? body.app : null, msg);
+      if (task.action === 'update_app' && task.app_id) setTimeout(() => checkAppHealth(task.app_id).catch(() => {}), 5000).unref();
+      return;
+    }
     if (!task.app_id) return;
     if (task.action === 'create_app') {
       db.prepare('UPDATE apps SET status = ?, status_msg = ? WHERE id = ?').run(ok ? 'active' : 'error', msg, task.app_id);
@@ -782,6 +807,57 @@ route('POST', '/api/apps/:id/credentials/reset', (req, p) => {
   });
   return { status: 'resetting' };
 });
+// ---- Gestionale versions & updates -------------------------------------------------------
+route('GET', '/api/apps/:id/updates', (req, p) => {
+  requireUser(req);
+  const app = db.prepare('SELECT * FROM apps WHERE id = ?').get(p.id);
+  if (!app) throw new HttpError(404, 'App non trovata');
+  const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(app.server_id);
+  const v = serverVersions(server);
+  return {
+    name: app.name, version: app.version, version_at: app.version_at, update: updates.decorate(app, server),
+    available: v.available, latest: v.latest, versions_at: v.at, versions_error: v.error,
+    history: updates.history(app.id), releases_url: cfg.releasesUrl, update_hour: cfg.updateHour, time_zone: cfg.timeZone,
+  };
+});
+route('POST', '/api/apps/:id/update', async (req, p) => {
+  const me = requireAdmin(req);
+  const body = await readBody(req);
+  try {
+    return updates.request(Number(p.id), str(body.version, 20), { by: me.username });
+  } catch (e) {
+    throw new HttpError(400, e.message);
+  }
+});
+route('POST', '/api/apps/:id/auto-update', async (req, p) => {
+  requireAdmin(req);
+  const body = await readBody(req);
+  const app = db.prepare('SELECT * FROM apps WHERE id = ?').get(p.id);
+  if (!app) throw new HttpError(404, 'App non trovata');
+  if (!(app.type === 'portal' && app.provisioned)) throw new HttpError(400, 'Solo per i gestionali delle squadre');
+  db.prepare('UPDATE apps SET auto_update = ? WHERE id = ?').run(body.enabled ? 1 : 0, app.id);
+  return { auto_update: !!body.enabled };
+});
+// Ask every server which versions it has, now.
+route('POST', '/api/updates/check', (req) => {
+  requireAdmin(req);
+  let n = 0;
+  for (const { id } of db.prepare('SELECT id FROM servers').all()) if (updates.refresh(id, { force: true })) n++;
+  return { servers: n };
+});
+// Every squad behind its server's latest version, one at a time per server.
+route('POST', '/api/updates/all', (req) => {
+  const me = requireAdmin(req);
+  const queued = [];
+  for (const { id } of db.prepare('SELECT id FROM servers').all()) {
+    for (const { app, latest } of updates.behind(id)) {
+      if (updates.pending(app.id)) continue;
+      updates.request(app.id, latest, { by: me.username });
+      queued.push(app.name);
+    }
+  }
+  return { queued };
+});
 // "Verifica ora": any signed-in user may re-run the reachability check of a portal.
 route('POST', '/api/apps/:id/health', async (req, p) => {
   requireUser(req);
@@ -894,11 +970,14 @@ async function checkAppHealth(appId, { force = false } = {}) {
   if (!healthEnabled && !force) return null;
   const app = db.prepare("SELECT id, domain FROM apps WHERE id = ? AND type = 'portal' AND status = 'active' AND domain IS NOT NULL").get(appId);
   if (!app) return null;
-  const { code, error } = await probe(app.domain, {
-    connectHost: cfg.proxyHost || undefined,
-    referenceHost: cfg.publicUrl ? new URL(cfg.publicUrl).hostname : undefined,
-  });
+  const opts = { connectHost: cfg.proxyHost || undefined, referenceHost: cfg.publicUrl ? new URL(cfg.publicUrl).hostname : undefined };
+  const { code, error } = await probe(app.domain, opts);
   db.prepare('UPDATE apps SET health = ?, health_code = ?, health_error = ?, health_at = ? WHERE id = ?').run(error ? 'down' : 'ok', code, error, now(), app.id);
+  // The running version, when the gestionale tells it (GET /api/stato, from 3.25)
+  if (!error) {
+    const version = await fetchVersion(app.domain, opts).catch(() => null);
+    if (version) updates.setVersion(app.id, version);
+  }
   return db.prepare('SELECT health, health_code, health_error, health_at FROM apps WHERE id = ?').get(app.id);
 }
 // Healthy portals every HEALTH_INTERVAL; portals that are down (typically waiting for DNS or
@@ -928,6 +1007,17 @@ if (require.main === module) {
     setTimeout(checkAllHealth, 5000).unref();
     setInterval(checkAllHealth, 60 * 1000).unref();
   }
+  const versionsTick = () => {
+    try {
+      updates.refreshAll();
+      const auto = updates.autoUpdate();
+      if (auto.length) console.log('[console] aggiornamenti automatici in coda:', auto.join(', '));
+    } catch (e) {
+      console.error('[console] versions', e);
+    }
+  };
+  setTimeout(versionsTick, 10000).unref();
+  setInterval(versionsTick, 5 * 60 * 1000).unref();
   server.listen(cfg.port, cfg.host, () => console.log(`[console] v${VERSION}${BUILD.commit ? ` (${BUILD.commit.slice(0, 7)})` : ''} in ascolto su http://${cfg.host}:${cfg.port} (retention ${cfg.retentionDays} giorni)`));
   const stop = () => server.close(() => process.exit(0));
   process.on('SIGTERM', stop);

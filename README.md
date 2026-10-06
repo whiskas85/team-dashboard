@@ -72,6 +72,10 @@ Senza Docker: `ADMIN_PASSWORD=... PUBLIC_URL=https://console.zerodarkteam.it npm
 | `PORTAL_DOMAIN` | `zerodarkteam.it` | dominio dei portali creati senza dominio esplicito |
 | `CREDENTIALS_KEY` | creata da `setup.sh` | chiave di cifratura delle password del primo accesso: non cambiarla mai |
 | `HEALTH_INTERVAL` | `300` | secondi tra i controlli `https://<dominio>/login` dei portali (0 = spento) |
+| `UPDATE_HOUR` | `4` | ora locale degli aggiornamenti automatici dei gestionali |
+| `TIME_ZONE` | `Europe/Rome` | fuso orario di `UPDATE_HOUR` |
+| `VERSIONS_INTERVAL` | `21600` | secondi tra una richiesta `list_versions` e l'altra a ogni server |
+| `RELEASES_URL` | `https://github.com/whiskas85/team-management/releases/tag/v` | link alle novità di una versione |
 | `TZ` | — | fuso orario per i profili orari (es. `Europe/Rome`) |
 
 ## Utenti
@@ -143,6 +147,18 @@ Contratto per `create_app`: usare `ZDT_APP_ADMIN_PASSWORD`, se presente, come pa
 In console, sotto il portale, **Accesso iniziale** (a scomparsa, solo amministratori; ogni visualizzazione viene registrata) mostra indirizzo, utente e password con *Mostra*, *Copia password* e *Copia messaggio per il cliente*.
 
 **Genera una nuova password** (stesso pannello, anche dal pulsante 🔑 Accesso nelle liste) serve quando la console non conosce la password: portale creato prima di questo contratto, `create_app` che ha scelto la sua, o cliente che l'ha persa. La console genera una password nuova e mette in coda l'hook `set_admin_password` con `ZDT_APP_NAME`, `ZDT_APP_DOMAIN`, `ZDT_APP_EMAIL` e `ZDT_APP_ADMIN_PASSWORD`. Contratto: impostare quella password all'utente admin della squadra (e solo a lui), non stamparla mai, e confermarlo nell'ultima riga JSON con `{"admin_password": "applied"}`. Senza la conferma la console mostra l'errore e non la password.
+
+#### Aggiornamenti dei gestionali
+
+Ogni squadra ha la sua versione del gestionale. Il lavoro rischioso lo fa il server (hook `update_app` → `squadra-server.sh aggiorna`: backup, cambio, controllo, ritorno automatico alla versione di prima se non risponde); la console decide **cosa e quando**.
+
+- **Versione in uso**: dal controllo del sito (`GET https://<dominio>/api/stato`, dal gestionale 3.25) oppure, per le squadre più vecchie, da `list_versions <nome>`.
+- **Versioni pronte sul server**: hook `list_versions`, chiesto ogni 6 ore (`VERSIONS_INTERVAL`) o con **Controlla versioni** nella scheda Portali.
+- **Aggiorna** (riga del portale): scegli la versione (anche una precedente), con il link alle novità. **Aggiorna tutti** porta alla più recente ogni squadra indietro.
+- **Aggiornamento automatico** (per portale): ogni notte alle `UPDATE_HOUR` alla versione più recente. Una versione che è già tornata indietro non viene ritentata da sola.
+- Un aggiornamento alla volta per server. Storico per portale, con l'output dello script quando non riesce.
+
+Solo i gestionali delle squadre (`zd-sq-*`): produzione e test seguono il loro rilascio.
 
 #### Rimozione, archivio ed eliminazione definitiva
 

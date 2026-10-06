@@ -276,3 +276,4 @@ button.danger-btn:disabled { opacity: 0.45; }
 .card-advice { margin-top: 12px; font-size: 13px; color: var(--ink-2); }
 .banner .card-advice { margin-top: 6px; }
 .st-unmonitored .dot { background: var(--muted); }
+.actions button { white-space: nowrap; }

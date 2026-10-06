@@ -57,7 +57,7 @@ const REASONS = {
   UNABLE_TO_VERIFY_LEAF_SIGNATURE: 'certificato non verificabile',
 };
 
-function httpsGet(domain, { connectHost, port = 443, path = '/login', lookup = publicLookup, timeout = 10000, ca } = {}) {
+function httpsGet(domain, { connectHost, port = 443, path = '/login', lookup = publicLookup, timeout = 10000, ca, body = false } = {}) {
   return new Promise((resolve) => {
     let done = false;
     const finish = (r) => {
@@ -78,6 +78,13 @@ function httpsGet(domain, { connectHost, port = 443, path = '/login', lookup = p
     };
     if (!connectHost) opts.lookup = lookup;
     const req = https.request(opts, (res) => {
+      if (body) {
+        let data = '';
+        res.setEncoding('utf8');
+        res.on('data', (c) => { if (data.length < 65536) data += c; });
+        res.on('end', () => finish({ code: res.statusCode, error: null, body: data }));
+        return;
+      }
       res.resume();
       // 401: the site answers but sits behind a password (e.g. basic auth on test environments)
       const up = res.statusCode === 200 || res.statusCode === 401;
@@ -112,4 +119,16 @@ async function probe(domain, opts = {}) {
   return httpsGet(domain, opts);
 }
 
-module.exports = { probe, publicLookup, publicResolve4 };
+/** Version the gestionale says it runs: GET /api/stato -> {"version":"3.25.0"}; null if it does not say. */
+async function fetchVersion(domain, opts = {}) {
+  const r = await httpsGet(domain, { ...opts, path: '/api/stato', body: true });
+  if (r.code !== 200) return null;
+  try {
+    const v = JSON.parse(r.body).version;
+    return typeof v === 'string' && /^\d+\.\d+\.\d+$/.test(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+module.exports = { probe, fetchVersion, publicLookup, publicResolve4 };

@@ -74,7 +74,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   server_id  INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
   app_id     INTEGER,
-  action     TEXT NOT NULL,                        -- create_app | remove_app
+  action     TEXT NOT NULL,                        -- create_app | remove_app | purge_app | set_admin_password | update_app | list_versions
   payload    TEXT NOT NULL,
   status     TEXT NOT NULL DEFAULT 'queued',       -- queued | sent | done | failed
   message    TEXT,
@@ -99,6 +99,13 @@ const MIGRATIONS = [
   ['apps', 'archived_at', 'INTEGER'],  // set when remove_app moved the portal to the archive
   ['apps', 'archived_by', 'TEXT'],
   ['apps', 'archive_path', 'TEXT'],    // e.g. /opt/archivio/squadra-demo-20261006120000
+  ['apps', 'version', 'TEXT'],         // gestionale version running (from /api/stato or the hooks)
+  ['apps', 'version_at', 'INTEGER'],
+  ['apps', 'auto_update', 'INTEGER NOT NULL DEFAULT 0'], // 1 = nightly update to the latest version
+  ['servers', 'versions', 'TEXT'],     // JSON {available, latest} from the list_versions hook
+  ['servers', 'versions_at', 'INTEGER'],
+  ['servers', 'versions_error', 'TEXT'],
+  ['tasks', 'result', 'TEXT'],         // JSON of the hook's last output line
 ];
 
 function open(file) {
