@@ -3,6 +3,8 @@
 // Pure functions over pre-bucketed, time-aligned series so it is easy to test.
 
 const STATUS_RANK = { ok: 0, info: 1, warning: 2, critical: 3, offline: 3 };
+// Days of data needed before a trend ("full in N days") is reported: fewer gives false alarms.
+const MIN_TREND_DAYS = 5;
 
 function clean(arr) {
   return arr.filter((v) => v !== null && v !== undefined && Number.isFinite(v));
@@ -127,8 +129,8 @@ function analyzeApp(app, s, buckets) {
       max_mb: round(max(s.mem_mb)),
     },
     trend: {
-      mem_mb_per_day: memTrend && memDaily.vals.length >= 3 ? round(memTrend.slope, 2) : null,
-      cpu_cores_per_day: cpuTrend && cpuDaily.vals.length >= 3 ? round(cpuTrend.slope, 4) : null,
+      mem_mb_per_day: memTrend && memDaily.vals.length >= MIN_TREND_DAYS ? round(memTrend.slope, 2) : null,
+      cpu_cores_per_day: cpuTrend && cpuDaily.vals.length >= MIN_TREND_DAYS ? round(cpuTrend.slope, 4) : null,
     },
     profile_hourly: {
       cpu_cores: hourlyProfile(buckets, cores),
@@ -153,9 +155,9 @@ function analyzeServer(server, s, appReports, buckets, appSeries, opts) {
   const diskDaily = daily(buckets, s.disk_used_gb, mean);
   const memDaily = daily(buckets, s.mem_used_mb, (v) => percentile(v, 0.95));
   const cpuDaily = daily(buckets, s.cpu_pct, (v) => percentile(v, 0.95));
-  const diskTrend = diskDaily.vals.length >= 3 ? linreg(diskDaily.days, diskDaily.vals) : null;
-  const memTrend = memDaily.vals.length >= 3 ? linreg(memDaily.days, memDaily.vals) : null;
-  const cpuTrend = cpuDaily.vals.length >= 3 ? linreg(cpuDaily.days, cpuDaily.vals) : null;
+  const diskTrend = diskDaily.vals.length >= MIN_TREND_DAYS ? linreg(diskDaily.days, diskDaily.vals) : null;
+  const memTrend = memDaily.vals.length >= MIN_TREND_DAYS ? linreg(memDaily.days, memDaily.vals) : null;
+  const cpuTrend = cpuDaily.vals.length >= MIN_TREND_DAYS ? linreg(cpuDaily.days, cpuDaily.vals) : null;
 
   // "Base" = what the server uses that is NOT attributed to a tracked app (OS, DB, cache, ...).
   const mine = appReports.filter((a) => a.server_id === server.id && appSeries[a.id]);

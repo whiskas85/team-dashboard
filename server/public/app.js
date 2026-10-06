@@ -39,7 +39,7 @@ function ago(ts) {
 const STATUS_LABEL = {
   ok: 'OK', info: 'Info', warning: 'Attenzione', critical: 'Critico', offline: 'Offline', online: 'Online',
   active: 'Attiva', pending: 'In coda', provisioning: 'In creazione', error: 'Errore', removing: 'In rimozione',
-  queued: 'In coda', sent: 'Inviato', done: 'Completato', failed: 'Fallito', archived: 'Archiviata', purging: 'In eliminazione',
+  queued: 'In coda', sent: 'Inviato', done: 'Completato', failed: 'Fallito', archived: 'Archiviata', purging: 'In eliminazione', unmonitored: 'Non monitorata',
 };
 const badge = (st, label) => `<span class="badge st-${esc(st)}"><i class="dot"></i>${esc(label || STATUS_LABEL[st] || st)}</span>`;
 
@@ -196,8 +196,20 @@ function serverCard(s, report) {
       ${meter('RAM', m.mem_used_mb, memMax, fmt.mb)}
       ${meter('Disco', m.disk_used_gb, diskMax, fmt.gb, { warn: 80 })}
     </div>
+    ${s.online ? adviceList(report?.advice, 2) : ''}
     <div class="meta"><span>${s.cpu_cores ? `${s.cpu_cores} vCPU · ` : ''}${s.apps} app</span><span>${s.last_seen ? `visto ${ago(s.last_seen)}` : 'mai visto'}</span></div>
   </div>`;
+}
+
+// Why a server is flagged: the analysis' advice, most serious first.
+const LEVEL_ORDER = { critical: 0, offline: 0, warning: 1, info: 2 };
+function adviceList(advice, max = Infinity) {
+  const items = (advice || []).filter((a) => a.level !== 'offline').sort((a, b) => LEVEL_ORDER[a.level] - LEVEL_ORDER[b.level]);
+  if (!items.length) return '';
+  const shown = items.slice(0, max);
+  const more = items.length - shown.length;
+  return `<ul class="advice card-advice">${shown.map((a) => `<li class="st-${a.level === 'critical' ? 'critical' : a.level === 'warning' ? 'warning' : 'info'}"><i class="dot"></i><span>${esc(a.text)}</span></li>`).join('')}
+    ${more > 0 ? `<li class="muted">+${more} ${more === 1 ? 'altra indicazione' : 'altre indicazioni'}: apri il server</li>` : ''}</ul>`;
 }
 
 function addServerModal(onDone) {
@@ -240,7 +252,8 @@ function installModal(r, title) {
 async function renderServer(id) {
   const main = shell('servers', '<div class="loading">Caricamento…</div>');
   const load = async () => {
-    const [s, metrics] = await Promise.all([api(`/api/servers/${id}`), api(`/api/servers/${id}/metrics?range=${state.range}`)]);
+    const [s, metrics, analysis] = await Promise.all([api(`/api/servers/${id}`), api(`/api/servers/${id}/metrics?range=${state.range}`), api('/api/analysis?days=7&n=1').catch(() => null)]);
+    const report = analysis?.servers.find((x) => x.id === s.id);
     const m = s.latest || {};
     const extra = m.extra || {};
     const memMax = m.mem_total_mb || s.mem_total_mb;
@@ -260,6 +273,8 @@ async function renderServer(id) {
           <button class="danger admin-only" id="del">Elimina</button>
         </div>
       </div>
+      ${s.online && report && report.advice.length ? `<div class="banner"><div class="icon" aria-hidden="true">${report.status === 'critical' ? '⚠' : report.status === 'warning' ? '!' : 'i'}</div>
+        <div style="min-width:0"><b>${esc({ critical: 'Critico', warning: 'Attenzione', info: 'Da sapere' }[report.status] || 'Indicazioni')}</b> <span class="muted">(ultimi 7 giorni)</span>${adviceList(report.advice)}</div></div>` : ''}
 
       <div class="grid cards">
         <div class="card"><div class="meters">
@@ -726,9 +741,12 @@ async function renderArchive() {
     const apps = await api('/api/apps?view=archive');
     const when = (a) => (a.archived_at ? `${esc(fmt.dateTime(a.archived_at))}${a.archived_by ? ` · ${esc(a.archived_by)}` : ''}` : '–');
     const note = (a) => (a.status === 'archived' && a.status_msg && /errore|fallit|non /i.test(a.status_msg) ? `<div class="err" style="font-size:12px">${esc(a.status_msg.slice(-200))}</div>` : '');
-    const purge = (a) => (a.status === 'archived' ? `<button class="small danger admin-only" data-purge="${a.id}">Elimina definitivamente</button>` : '');
+    const purge = (a) => {
+      if (a.status === 'unmonitored') return `<div class="row actions"><button class="small primary admin-only" data-reattach="${a.id}">Ricollega</button><button class="small danger admin-only" data-purge="${a.id}">Togli dalla console</button></div>`;
+      return a.status === 'archived' ? `<button class="small danger admin-only" data-purge="${a.id}">Elimina definitivamente</button>` : '';
+    };
     main.innerHTML = `${homeTabs('archive')}
-      <div class="page-head"><div><h1>Archivio</h1><p>Portali rimossi dal server: container fermati e sito staccato, dati conservati nei volumi e in <code>/opt/archivio</code>.</p></div></div>
+      <div class="page-head"><div><h1>Archivio</h1><p><b>Archiviate</b>: portali rimossi dal server (container fermati, sito staccato, dati conservati in <code>/opt/archivio</code> e nei volumi). <b>Non monitorate</b>: app ancora accese sul server che la console non segue più, da ricollegare con un clic.</p></div></div>
       ${!apps.length ? '<div class="card empty-state"><p>L\'archivio è vuoto.</p></div>' : `
       <div class="card table-wrap desktop-only"><table>
         <thead><tr><th>Portale</th><th>Server</th><th>Archiviato</th><th>Cartella</th><th>Stato</th><th></th></tr></thead>
@@ -745,6 +763,11 @@ async function renderArchive() {
           <div class="mono" style="font-size:12px;word-break:break-all">${esc(a.archive_path || '')}</div>${note(a)}
           <div class="row actions">${purge(a)}</div></div>`).join('')}</div>`}`;
     wireAppActions(main, apps, load);
+    main.querySelectorAll('[data-reattach]').forEach((b) => (b.onclick = async () => {
+      b.disabled = true;
+      try { await api(`/api/apps/${b.dataset.reattach}/reattach`, { method: 'POST' }); } catch (e) { b.textContent = e.message; return; }
+      load();
+    }));
   };
   await load();
   setRefresh(load);
@@ -768,7 +791,7 @@ function removeAppModal(app, onDone) {
     <p class="ink2">Quest'app non è stata creata dalla console: dalla console si può solo smettere di monitorarla, il server non viene toccato.${app.type === 'portal' ? '' : ''}</p>`}
     <div class="choice">
       <h3>Smetti solo di monitorare</h3>
-      <p class="ink2">L'app resta accesa sul server e sparisce dalla console. Se è nella configurazione dell'agent ricompare al prossimo invio.</p>
+      <p class="ink2">L'app resta accesa sul server: la console smette di seguirla e la sposta nell'<b>Archivio</b>, da dove puoi <b>ricollegarla</b> quando vuoi.</p>
       <button id="mon">Smetti di monitorare</button>
     </div>
     <div class="err" id="e"></div>
@@ -791,8 +814,8 @@ function removeAppModal(app, onDone) {
 function purgeAppModal(app, onDone) {
   if (!app) return;
   modal(`
-    <h2>Elimina definitivamente ${esc(app.name)}</h2>
-    <p class="ink2">${app.provisioned
+    <h2>${app.status === 'unmonitored' ? 'Togli dalla console' : 'Elimina definitivamente'} ${esc(app.name)}</h2>
+    <p class="ink2">${app.provisioned && app.status !== 'unmonitored'
       ? `Sul server vengono cancellati i <b>volumi dei dati</b> (database, allegati, WhatsApp) e la cartella archiviata${app.archive_path ? ` <code>${esc(app.archive_path)}</code>` : ''}. <b>Non si può annullare.</b>`
       : 'Viene tolta solo dalla console: sul server non c\'è nulla da cancellare.'}</p>
     <div class="field"><label for="cf">Per confermare scrivi <b>${esc(app.name)}</b></label><input id="cf" autocomplete="off"></div>
