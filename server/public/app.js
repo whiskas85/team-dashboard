@@ -332,6 +332,7 @@ async function renderServer(id) {
       try { await api(`/api/apps/${b.dataset.health}/health`, { method: 'POST' }); } catch (e) { alert(e.message); }
       load();
     }));
+    main.querySelectorAll('details[data-cred]').forEach((d) => d.addEventListener('toggle', () => d.open && loadCredentials(d)));
     main.querySelectorAll('[data-edit-app]').forEach((b) => (b.onclick = () => editAppModal(s.apps.find((a) => a.id === Number(b.dataset.editApp)), load)));
     main.querySelectorAll('[data-del-app]').forEach((b) => (b.onclick = async () => {
       const app = s.apps.find((a) => a.id === Number(b.dataset.delApp));
@@ -372,7 +373,7 @@ function appsTable(apps) {
       <td class="r">${fmt.mb(a.last24h.mem_max)}</td>
       <td>${a.domain ? (a.type === 'portal' ? `<a href="https://${esc(a.domain)}" target="_blank" rel="noopener">${esc(a.domain)}</a>` : esc(a.domain)) : '<span class="muted">–</span>'}${a.port ? `<span class="muted">:${a.port}</span>` : ''}${healthBadge(a)}</td>
       <td class="r"><div class="row" style="justify-content:flex-end;flex-wrap:nowrap"><button class="small admin-only" data-edit-app="${a.id}" aria-label="Modifica ${esc(a.name)}">Modifica</button><button class="small danger admin-only" data-del-app="${a.id}" aria-label="Rimuovi ${esc(a.name)}">Rimuovi</button></div></td>
-    </tr>`).join('')}</tbody></table></div>
+    </tr>${credentialsRow(a)}`).join('')}</tbody></table></div>
     <p class="muted" style="font-size:12px;margin:10px 0 0">CPU in core (1,00 = un core pieno). Clicca su un'app per vederne l'andamento.</p>`;
 }
 
@@ -389,6 +390,51 @@ function healthBadge(a) {
   // "Verifica ora" only while there is something to wait for: a healthy site needs no button.
   const retry = a.health === 'ok' ? '' : `<button class="small" data-health="${a.id}" title="Ricontrolla adesso">Verifica ora</button>`;
   return `<div class="row" style="gap:6px;margin-top:4px">${b}${retry}</div>${why}`;
+}
+
+// First-access credentials of portals created by the console: collapsed, admins only, fetched on open.
+function credentialsRow(a) {
+  if (!a.credentials || !isAdmin()) return '';
+  const c = a.credentials;
+  let body;
+  if (c.status === 'pending') body = '<p class="muted">Il portale è in creazione: la password sarà disponibile quando lo script avrà finito.</p>';
+  else if (c.status === 'unsupported') body = `<p class="muted">Lo script del gestionale ha scelto una sua password e non quella della console. La trovi sul server in <code>/opt/squadra-${esc(a.name)}/ACCESSO.txt</code>.</p>`;
+  else body = '<div class="cred-body" data-cred-body><p class="muted">Caricamento…</p></div>';
+  const seen = c.revealed_at ? ` · vista da ${esc(c.revealed_by || '?')} ${ago(c.revealed_at)}` : '';
+  return `<tr class="cred-row"><td colspan="9"><details data-cred="${a.id}" data-cred-status="${esc(c.status)}">
+    <summary>🔑 Accesso iniziale<span class="muted" style="font-weight:400">${seen}</span></summary>${body}</details></td></tr>`;
+}
+
+async function loadCredentials(details) {
+  const box = details.querySelector('[data-cred-body]');
+  if (!box || box.dataset.loaded) return;
+  try {
+    const c = await api(`/api/apps/${details.dataset.cred}/credentials`);
+    box.dataset.loaded = '1';
+    const user = c.username || 'admin';
+    const message = `Ciao,\nil tuo gestionale è pronto.\n\nIndirizzo: ${c.login_url}\nUtente: ${user}\nPassword: ${c.password}\n\nAl primo accesso cambia la password con una scelta da te.`;
+    box.innerHTML = `
+      <div class="cred-grid">
+        <span class="muted">Indirizzo</span><span><a href="${esc(c.login_url)}" target="_blank" rel="noopener">${esc(c.login_url)}</a></span>
+        <span class="muted">Utente</span><span class="mono">${esc(user)}</span>
+        <span class="muted">Password</span><span class="row" style="gap:8px"><code class="pw" data-pw>••••••••••••••••</code>
+          <button type="button" class="small" data-pw-toggle>Mostra</button><button type="button" class="small" data-copy="pw">Copia password</button></span>
+      </div>
+      <div class="row" style="margin-top:10px"><button type="button" class="small primary" data-copy="msg">Copia messaggio per il cliente</button>
+        <span class="muted" style="font-size:12px">Indirizzo, utente e password pronti da inviare. Consiglia di cambiarla al primo accesso.</span></div>`;
+    const pw = box.querySelector('[data-pw]');
+    box.querySelector('[data-pw-toggle]').onclick = (e) => {
+      const show = pw.textContent.startsWith('•');
+      pw.textContent = show ? c.password : '••••••••••••••••';
+      e.target.textContent = show ? 'Nascondi' : 'Mostra';
+    };
+    box.querySelectorAll('[data-copy]').forEach((b) => (b.onclick = async () => {
+      const text = b.dataset.copy === 'pw' ? c.password : message;
+      try { await navigator.clipboard.writeText(text); b.textContent = 'Copiato ✓'; } catch { b.textContent = 'Copia non riuscita'; }
+    }));
+  } catch (e) {
+    box.innerHTML = `<p class="err">${esc(e.message)}</p>`;
+  }
 }
 
 async function showApp(app) {
@@ -432,8 +478,8 @@ function newAppModal(server, onDone) {
       <div class="field"><label for="n">Nome</label><input id="n" required autocomplete="off" placeholder="es. rossi"><small id="n-hint"></small></div>
       <div class="portal-only">
         <div class="field"><label for="d">Dominio</label><input id="d" autocomplete="off"><small>Vuoto = <code id="d-default"></code>. Se il DNS non punta ancora al server, il portale nasce lo stesso e il sito si attiva quando il record c'è.</small></div>
-        <div class="field"><label for="em">Email dell'amministratore (opzionale)</label><input id="em" type="email" autocomplete="off" placeholder="admin@cliente.it"></div>
-        <p class="muted" style="font-size:13px;margin:0 0 14px">Crea database, app e WhatsApp del gestionale con le immagini della produzione, partendo da un database vuoto. La password dell'admin non compare in console: resta sul server in <code id="acc"></code>.</p>
+        <div class="field"><label for="em">Email dell'amministratore</label><input id="em" type="email" autocomplete="off" placeholder="admin@cliente.it"><small>È l'utente con cui il nuovo proprietario entra la prima volta.</small></div>
+        <p class="muted" style="font-size:13px;margin:0 0 14px">Crea database, app e WhatsApp del gestionale con le immagini della produzione, partendo da un database vuoto. La password del primo accesso la genera la console: la trovi nella riga del portale, sotto <b>Accesso iniziale</b>, pronta da consegnare.</p>
       </div>
       <div class="other-only" hidden>
         <div class="inline-fields" style="margin-bottom:14px">
@@ -458,7 +504,6 @@ function newAppModal(server, onDone) {
       const name = v('#n').toLowerCase();
       $('#d-default').textContent = `${name || '<nome>'}.${suffix}`;
       $('#d').placeholder = `${name || '<nome>'}.${suffix}`;
-      $('#acc').textContent = `/opt/squadra-${name || '<nome>'}/ACCESSO.txt`;
       let hint = '';
       if (portal && name) {
         if (/^(ops|www|test.*)$/.test(name)) hint = 'Nome riservato (ops, test*, www). Per una prova usa "demo".';
@@ -473,6 +518,7 @@ function newAppModal(server, onDone) {
     $('#f').onsubmit = async (e) => {
       e.preventDefault();
       const portal = isPortal();
+      if (portal && !v('#em')) { $('#e').textContent = "Indica l'email dell'amministratore: sarà il suo utente."; return; }
       const body = portal
         ? { type: 'portal', name: v('#n').toLowerCase(), domain: v('#d') || null, email: v('#em') || null, provision: $('#pv').checked }
         : { type: v('#t'), name: v('#n'), kind: v('#k'), port: v('#p') ? Number(v('#p')) : null, domain: v('#d2') || null, match: v('#mt') || null, provision: $('#pv').checked };
