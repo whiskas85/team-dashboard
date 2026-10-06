@@ -3,6 +3,9 @@
 name: zerodark-console
 services:
   console:
+    environment:
+      # portal health checks talk to the proxy over this network instead of the public IP
+      PROXY_HOST: ${PROXY_HOST:-zd-proxy}
     networks:
       default: {}
       edge:

@@ -42,6 +42,22 @@ test('probe: 200, other status, TLS without certificate, DNS failure', async (t)
   assert.equal(tls.code, 0);
   assert.match(tls.error, /TLS|certificato/);
 
+  // Through the proxy on the internal network: certificate checked against the portal name.
+  assert.deepEqual(await probe('demo.zerodarkteam.it', { connectHost: '127.0.0.1', port, ca: cert }), { code: 200, error: null });
+  const wrongName = await probe('altro.zerodarkteam.it', { connectHost: '127.0.0.1', port, ca: cert });
+  assert.equal(wrongName.code, 0);
+  assert.match(wrongName.error, /altro nome|certificat/);
+
+  // DNS step: compared with the console's own domain (this machine)
+  const dnsTable = { 'console.zerodarkteam.it': ['209.227.239.117'], 'demo.zerodarkteam.it': ['209.227.239.117'], 'nuovo.zerodarkteam.it': [], 'altrove.zerodarkteam.it': ['1.2.3.4'] };
+  const resolve4 = async (n) => dnsTable[n] ?? [];
+  const viaProxy = { connectHost: '127.0.0.1', port, ca: cert, referenceHost: 'console.zerodarkteam.it', resolve4 };
+  assert.deepEqual(await probe('demo.zerodarkteam.it', viaProxy), { code: 200, error: null });
+  assert.deepEqual(await probe('nuovo.zerodarkteam.it', viaProxy), { code: 0, error: 'nome non trovato nel DNS' });
+  assert.match((await probe('altrove.zerodarkteam.it', viaProxy)).error, /punta a 1\.2\.3\.4, non a questo server/);
+  // public resolvers unreachable: DNS step skipped, HTTPS still checked
+  assert.deepEqual(await probe('demo.zerodarkteam.it', { ...viaProxy, resolve4: async () => null }), { code: 200, error: null });
+
   const nodns = await probe('demo.zerodarkteam.it', { lookup: (h, o, cb) => (typeof o === 'function' ? o : cb)(Object.assign(new Error('x'), { code: 'ENOTFOUND' })) });
   assert.deepEqual(nodns, { code: 0, error: 'nome non trovato nel DNS' });
 });

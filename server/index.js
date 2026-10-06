@@ -36,6 +36,8 @@ const cfg = {
   // Portals (gestionale) get <name>.<portalDomain> unless a domain is given.
   portalDomain: (process.env.PORTAL_DOMAIN || 'zerodarkteam.it').replace(/^\.+|\.+$/g, ''),
   healthInterval: Number(process.env.HEALTH_INTERVAL ?? 300),
+  // Reverse proxy reachable on the internal Docker network: portal checks go through it directly.
+  proxyHost: process.env.PROXY_HOST || '',
 };
 
 const db = open(cfg.dbFile);
@@ -730,7 +732,10 @@ async function checkAppHealth(appId, { force = false } = {}) {
   if (!healthEnabled && !force) return null;
   const app = db.prepare("SELECT id, domain FROM apps WHERE id = ? AND type = 'portal' AND status = 'active' AND domain IS NOT NULL").get(appId);
   if (!app) return null;
-  const { code, error } = await probe(app.domain);
+  const { code, error } = await probe(app.domain, {
+    connectHost: cfg.proxyHost || undefined,
+    referenceHost: cfg.publicUrl ? new URL(cfg.publicUrl).hostname : undefined,
+  });
   db.prepare('UPDATE apps SET health = ?, health_code = ?, health_error = ?, health_at = ? WHERE id = ?').run(code === 200 ? 'ok' : 'down', code, error, now(), app.id);
   return db.prepare('SELECT health, health_code, health_error, health_at FROM apps WHERE id = ?').get(app.id);
 }
