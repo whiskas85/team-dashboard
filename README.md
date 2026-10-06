@@ -70,6 +70,7 @@ Senza Docker: `ADMIN_PASSWORD=... PUBLIC_URL=https://console.zerodarkteam.it npm
 | `PUBLIC_URL` | dall'header Host | URL usato nei comandi di installazione |
 | `DB_FILE` | `data/console.db` | percorso del database SQLite |
 | `PORTAL_DOMAIN` | `zerodarkteam.it` | dominio dei portali creati senza dominio esplicito |
+| `CREDENTIALS_KEY` | creata da `setup.sh` | chiave di cifratura delle password del primo accesso: non cambiarla mai |
 | `HEALTH_INTERVAL` | `300` | secondi tra i controlli `https://<dominio>/login` dei portali (0 = spento) |
 | `TZ` | — | fuso orario per i profili orari (es. `Europe/Rome`) |
 
@@ -130,6 +131,14 @@ ln -sf /opt/gestionale/deploy/console-hooks/remove_app /etc/zdt-agent/hooks/remo
 ```
 
 Dalla console, **Nuova app → Portale**: nome (minuscole, numeri, trattini; `ops`, `test*` e `www` sono riservati, per una prova `demo`), dominio (vuoto = `<nome>.zerodarkteam.it`, configurabile con `PORTAL_DOMAIN`) ed email dell'admin (`ZDT_APP_EMAIL`). L'app viene monitorata da subito sui container `^zd-sq-<nome>-`. La password dell'admin resta sul server in `/opt/squadra-<nome>/ACCESSO.txt`. Ogni 5 minuti (`HEALTH_INTERVAL`) la console verifica che `https://<dominio>/login` risponda 200 e lo mostra nella tabella delle app.
+
+#### Password del primo accesso
+
+Per i portali creati dalla console, la password iniziale dell'admin la **sceglie la console**: 16 caratteri senza simboli ambigui, salvati cifrati (AES-256-GCM, chiave `CREDENTIALS_KEY` nel `.env`, fuori dal database). Arriva a `create_app` come `ZDT_APP_ADMIN_PASSWORD` (e nel JSON su stdin come `admin_password`), aggiunta solo al momento della consegna: non è mai nei task, nei messaggi o nei log.
+
+Contratto per `create_app`: usare `ZDT_APP_ADMIN_PASSWORD`, se presente, come password dell'admin di partenza (utente `ZDT_APP_EMAIL`), non stamparla mai, e confermarlo nell'ultima riga JSON con `"admin_password": "applied"`. Senza la conferma la console non mostra nessuna password, perché potrebbe essere sbagliata.
+
+In console, sotto il portale, **Accesso iniziale** (a scomparsa, solo amministratori; ogni visualizzazione viene registrata) mostra indirizzo, utente e password con *Mostra*, *Copia password* e *Copia messaggio per il cliente*.
 
 ### Creazione app (hook)
 

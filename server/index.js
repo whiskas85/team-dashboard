@@ -10,6 +10,7 @@ const { open, purge, tx } = require('./db');
 const { analyze } = require('./analytics');
 const { Users, ROLES, sessionCookie, sessionUser, publicUser } = require('./auth');
 const { probe } = require('./health');
+const { Credentials, keyFrom } = require('./credentials');
 
 const VERSION = require('../package.json').version;
 // Written by the deploy workflow (commit, date, run); absent on manual installs.
@@ -56,6 +57,7 @@ function setting(key, init) {
 }
 const SESSION_SECRET = setting('session_secret', () => crypto.randomBytes(32).toString('hex'));
 const users = new Users(db);
+const credentials = new Credentials(db, keyFrom(process.env.CREDENTIALS_KEY, SESSION_SECRET));
 if (!users.count()) {
   let pw = cfg.adminPassword;
   if (!pw) {
@@ -254,7 +256,8 @@ function appRows(serverId) {
   return apps.map((a) => {
     const last = db.prepare('SELECT ts, cpu_pct, mem_mb, procs FROM app_metrics WHERE app_id = ? ORDER BY ts DESC LIMIT 1').get(a.id);
     const day = db.prepare('SELECT AVG(cpu_pct) cpu_avg, MAX(cpu_pct) cpu_max, AVG(mem_mb) mem_avg, MAX(mem_mb) mem_max FROM app_metrics WHERE app_id = ? AND ts >= ?').get(a.id, since);
-    return { ...a, latest: last || null, last24h: day };
+    const cred = credentials.status(a.id);
+    return { ...a, latest: last || null, last24h: day, credentials: cred && { status: cred.status, username: cred.username, revealed_at: cred.revealed_at, revealed_by: cred.revealed_by } };
   });
 }
 
@@ -381,7 +384,7 @@ function agentConfig(server) {
     .all(server.id);
   // Re-deliver tasks that were sent but never acknowledged (agent restart, network error...).
   const tasks = db
-    .prepare("SELECT id, action, payload FROM tasks WHERE server_id = ? AND (status = 'queued' OR (status = 'sent' AND updated_at < ?)) ORDER BY id")
+    .prepare("SELECT id, app_id, action, payload FROM tasks WHERE server_id = ? AND (status = 'queued' OR (status = 'sent' AND updated_at < ?)) ORDER BY id")
     .all(server.id, now() - 600);
   const mark = db.prepare("UPDATE tasks SET status = 'sent', updated_at = ? WHERE id = ?");
   const prov = db.prepare("UPDATE apps SET status = 'provisioning' WHERE id = (SELECT app_id FROM tasks WHERE id = ?) AND status = 'pending'");
@@ -392,7 +395,15 @@ function agentConfig(server) {
   return {
     interval: cfg.agentInterval,
     apps,
-    tasks: tasks.map((t) => ({ id: t.id, action: t.action, payload: JSON.parse(t.payload) })),
+    tasks: tasks.map((t) => {
+      const payload = JSON.parse(t.payload);
+      // Added at delivery time only: the stored payload never contains the password.
+      if (t.action === 'create_app' && t.app_id) {
+        const pw = credentials.forProvisioning(t.app_id);
+        if (pw) payload.admin_password = pw;
+      }
+      return { id: t.id, action: t.action, payload };
+    }),
   };
 }
 
@@ -409,6 +420,9 @@ function ackTask(server, id, body) {
       const patch = body.app || {};
       if (ok && patch.match) db.prepare('UPDATE apps SET match = ?, kind = ? WHERE id = ?').run(str(patch.match), oneOf(patch.kind, ['process', 'docker', 'systemd'], 'process'), task.app_id);
       if (ok) setTimeout(() => checkAppHealth(task.app_id), 15000).unref();
+      // create_app confirms with {"admin_password": "applied"} on its last line; otherwise the
+      // gestionale picked its own password and the console must not show one.
+      if (ok && credentials.status(task.app_id)) credentials.setStatus(task.app_id, patch.admin_password === 'applied' ? 'applied' : 'unsupported');
     } else if (task.action === 'remove_app') {
       if (ok) db.prepare('DELETE FROM apps WHERE id = ?').run(task.app_id);
       else db.prepare("UPDATE apps SET status = 'error', status_msg = ? WHERE id = ?").run(msg, task.app_id);
@@ -601,6 +615,8 @@ route('POST', '/api/servers/:id/apps', async (req, p) => {
       .prepare('INSERT INTO apps (server_id, name, type, kind, match, domain, port, template, status, provisioned, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
       .run(server.id, name, type, kind, match, domain, port, template, provision ? 'pending' : 'active', provision ? 1 : 0, t);
     const appId = Number(r.lastInsertRowid);
+    // Portals: the console picks the first-access password and hands it to create_app.
+    if (provision && type === 'portal') credentials.create(appId, email, t);
     if (provision) {
       db.prepare("INSERT INTO tasks (server_id, app_id, action, payload, status, created_at, updated_at) VALUES (?, ?, 'create_app', ?, 'queued', ?, ?)").run(
         server.id, appId, JSON.stringify({ name, type, kind, match, domain, port, template, email }), t, t
@@ -656,6 +672,15 @@ route('PATCH', '/api/apps/:id', async (req, p) => {
   invalidateAnalysis();
   checkAppHealth(app.id).catch(() => {});
   return db.prepare('SELECT id, name, type, domain, match FROM apps WHERE id = ?').get(app.id);
+});
+// First-access credentials of a portal created by the console (admins only, each view is recorded).
+route('GET', '/api/apps/:id/credentials', (req, p) => {
+  const me = requireAdmin(req);
+  const app = db.prepare('SELECT id, domain FROM apps WHERE id = ?').get(p.id);
+  if (!app) throw new HttpError(404, 'App non trovata');
+  const c = credentials.reveal(app.id, me.username, now());
+  if (!c) throw new HttpError(404, 'Nessuna credenziale iniziale per questa app');
+  return { ...c, login_url: app.domain ? `https://${app.domain}/login` : null };
 });
 // "Verifica ora": any signed-in user may re-run the reachability check of a portal.
 route('POST', '/api/apps/:id/health', async (req, p) => {

@@ -40,6 +40,12 @@ if [ ! -f .env ]; then
   chmod 600 .env
 fi
 grep -q '^CONSOLE_PORT=' .env || echo "CONSOLE_PORT=$CONSOLE_PORT" >> .env
+# Key for the portals' first-access passwords: kept here, outside the database. Generated once and
+# never replaced (a new key would make the stored passwords unreadable).
+if ! grep -q '^CREDENTIALS_KEY=.' .env; then
+  KEY="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  if grep -q '^CREDENTIALS_KEY=' .env; then sed -i "s/^CREDENTIALS_KEY=.*/CREDENTIALS_KEY=$KEY/" .env; else echo "CREDENTIALS_KEY=$KEY" >> .env; fi
+fi
 CONSOLE_PORT="$(grep '^CONSOLE_PORT=' .env | cut -d= -f2)"
 DOMAIN="$(grep '^DOMAIN=' .env | cut -d= -f2)"
 
