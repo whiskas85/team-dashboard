@@ -89,11 +89,22 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 `;
 
+// Columns added after the first release: existing databases get them on startup.
+const MIGRATIONS = [
+  ['apps', 'health', 'TEXT'],        // ok | down
+  ['apps', 'health_code', 'INTEGER'], // HTTP status (0 = unreachable)
+  ['apps', 'health_at', 'INTEGER'],
+];
+
 function open(file) {
   if (file !== ':memory:') fs.mkdirSync(path.dirname(file), { recursive: true });
   const db = new DatabaseSync(file);
   db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA synchronous = NORMAL;');
   db.exec(SCHEMA);
+  for (const [table, col, type] of MIGRATIONS) {
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+    if (!cols.includes(col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
+  }
   return db;
 }
 

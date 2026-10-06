@@ -32,6 +32,9 @@ const cfg = {
   adminPassword: process.env.ADMIN_PASSWORD || '',
   exportToken: process.env.EXPORT_TOKEN || '',
   cookieSecure: process.env.COOKIE_SECURE !== 'false',
+  // Portals (gestionale) get <name>.<portalDomain> unless a domain is given.
+  portalDomain: (process.env.PORTAL_DOMAIN || 'zerodarkteam.it').replace(/^\.+|\.+$/g, ''),
+  healthInterval: Number(process.env.HEALTH_INTERVAL ?? 300),
 };
 
 const db = open(cfg.dbFile);
@@ -187,6 +190,11 @@ function throttleLogin(ip) {
 // Validation
 // ---------------------------------------------------------------------------
 const NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$/;
+// Portal names become a subdomain and container names (zd-sq-<name>-*): lowercase DNS label.
+const PORTAL_NAME_RE = /^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$/;
+// Same rule as the gestionale's squadra-server.sh: production, test instances and www are off limits.
+const RESERVED_PORTAL_RE = /^(ops|www|test.*)$/;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const DOMAIN_RE = /^(?=.{1,253}$)([a-zA-Z0-9-]{1,63}\.)+[a-zA-Z]{2,63}$/;
 function str(v, max = 200) {
   if (v === undefined || v === null || v === '') return null;
@@ -397,6 +405,7 @@ function ackTask(server, id, body) {
       db.prepare('UPDATE apps SET status = ?, status_msg = ? WHERE id = ?').run(ok ? 'active' : 'error', msg, task.app_id);
       const patch = body.app || {};
       if (ok && patch.match) db.prepare('UPDATE apps SET match = ?, kind = ? WHERE id = ?').run(str(patch.match), oneOf(patch.kind, ['process', 'docker', 'systemd'], 'process'), task.app_id);
+      if (ok) setTimeout(() => checkAppHealth(task.app_id), 15000).unref();
     } else if (task.action === 'remove_app') {
       if (ok) db.prepare('DELETE FROM apps WHERE id = ?').run(task.app_id);
       else db.prepare("UPDATE apps SET status = 'error', status_msg = ? WHERE id = ?").run(msg, task.app_id);
@@ -433,7 +442,7 @@ route('POST', '/api/logout', (req, p, q, res) => {
 });
 route('GET', '/api/me', (req) => {
   const u = currentUser(req);
-  return { authenticated: !!u, user: publicUser(u), version: VERSION, build: buildInfo, retention_days: cfg.retentionDays, headroom: cfg.headroom };
+  return { authenticated: !!u, user: publicUser(u), version: VERSION, build: buildInfo, portal_domain: cfg.portalDomain, retention_days: cfg.retentionDays, headroom: cfg.headroom };
 });
 // Own account: change username and/or password. Always requires the current password.
 route('PATCH', '/api/me', async (req, p, q, res) => {
@@ -561,16 +570,26 @@ route('POST', '/api/servers/:id/apps', async (req, p) => {
   const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(p.id);
   if (!server) throw new HttpError(404, 'Server non trovato');
   const body = await readBody(req);
+  const type = oneOf(body.type, ['portal', 'service', 'other'], 'portal');
   const name = str(body.name, 63);
   if (!name || !NAME_RE.test(name)) throw new HttpError(400, 'Nome app non valido (lettere, numeri, . _ -)');
-  const domain = str(body.domain, 253);
+  if (type === 'portal') {
+    if (!PORTAL_NAME_RE.test(name)) throw new HttpError(400, 'Nome portale non valido: solo minuscole, numeri e trattini (max 40), diventa il sottodominio');
+    if (RESERVED_PORTAL_RE.test(name)) throw new HttpError(400, `"${name}" è un nome riservato (ops, test*, www): scegline un altro, per una prova usa "demo"`);
+  }
+  let domain = str(body.domain, 253);
+  if (domain) domain = domain.toLowerCase();
   if (domain && !DOMAIN_RE.test(domain)) throw new HttpError(400, 'Dominio non valido');
+  if (type === 'portal' && !domain) domain = `${name}.${cfg.portalDomain}`;
+  if (type === 'portal' && (domain === cfg.portalDomain || domain === `www.${cfg.portalDomain}`)) throw new HttpError(400, 'Dominio riservato');
+  const email = str(body.email, 254);
+  if (email && !EMAIL_RE.test(email)) throw new HttpError(400, 'Email non valida');
   const port = num(body.port);
   if (port !== null && (port < 1 || port > 65535 || !Number.isInteger(port))) throw new HttpError(400, 'Porta non valida');
   if (db.prepare('SELECT 1 FROM apps WHERE server_id = ? AND name = ?').get(server.id, name)) throw new HttpError(409, 'App già presente su questo server');
-  const type = oneOf(body.type, ['portal', 'service', 'other'], 'portal');
-  const kind = oneOf(body.kind, ['process', 'docker', 'systemd'], 'docker');
-  const match = str(body.match, 200) || name;
+  // Portals: containers zd-sq-<name>-{db,app,whatsapp}, monitored as one app from the start.
+  const kind = type === 'portal' ? 'docker' : oneOf(body.kind, ['process', 'docker', 'systemd'], 'docker');
+  const match = type === 'portal' ? `^zd-sq-${name}-` : str(body.match, 200) || name;
   const template = str(body.template, 63);
   const provision = body.provision !== false;
   const t = now();
@@ -581,7 +600,7 @@ route('POST', '/api/servers/:id/apps', async (req, p) => {
     const appId = Number(r.lastInsertRowid);
     if (provision) {
       db.prepare("INSERT INTO tasks (server_id, app_id, action, payload, status, created_at, updated_at) VALUES (?, ?, 'create_app', ?, 'queued', ?, ?)").run(
-        server.id, appId, JSON.stringify({ name, type, kind, match, domain, port, template }), t, t
+        server.id, appId, JSON.stringify({ name, type, kind, match, domain, port, template, email }), t, t
       );
     }
     return appId;
@@ -695,6 +714,28 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Portal health: https://<domain>/login must answer 200
+// ---------------------------------------------------------------------------
+let healthEnabled = false;
+async function checkAppHealth(appId) {
+  if (!healthEnabled) return;
+  const app = db.prepare("SELECT id, domain FROM apps WHERE id = ? AND type = 'portal' AND status = 'active' AND domain IS NOT NULL").get(appId);
+  if (!app) return;
+  let code = 0;
+  try {
+    const res = await fetch(`https://${app.domain}/login`, { redirect: 'manual', signal: AbortSignal.timeout(10000) });
+    code = res.status;
+  } catch {
+    code = 0; // DNS not ready, TLS not issued yet, connection refused...
+  }
+  db.prepare('UPDATE apps SET health = ?, health_code = ?, health_at = ? WHERE id = ?').run(code === 200 ? 'ok' : 'down', code, now(), app.id);
+}
+async function checkAllHealth() {
+  const ids = db.prepare("SELECT id FROM apps WHERE type = 'portal' AND status = 'active' AND domain IS NOT NULL").all();
+  for (const { id } of ids) await checkAppHealth(id);
+}
+
 function housekeeping() {
   try {
     const r = purge(db, cfg.retentionDays);
@@ -707,6 +748,11 @@ function housekeeping() {
 if (require.main === module) {
   housekeeping();
   setInterval(housekeeping, 3600 * 1000).unref();
+  if (cfg.healthInterval > 0) {
+    healthEnabled = true;
+    setTimeout(checkAllHealth, 5000).unref();
+    setInterval(checkAllHealth, cfg.healthInterval * 1000).unref();
+  }
   server.listen(cfg.port, cfg.host, () => console.log(`[console] v${VERSION}${BUILD.commit ? ` (${BUILD.commit.slice(0, 7)})` : ''} in ascolto su http://${cfg.host}:${cfg.port} (retention ${cfg.retentionDays} giorni)`));
   const stop = () => server.close(() => process.exit(0));
   process.on('SIGTERM', stop);
