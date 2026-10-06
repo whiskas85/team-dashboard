@@ -148,7 +148,12 @@ esac
 
 say "Fatto"
 echo "URL:             https://$DOMAIN"
-echo "Primo accesso:   utente admin, password $(grep '^ADMIN_PASSWORD=' .env | cut -d= -f2)"
-echo "                 (vale solo finché non la cambi da 'Il mio account')"
-echo "Token export AI: $(grep '^EXPORT_TOKEN=' .env | cut -d= -f2)"
+# Secrets are shown only in an interactive terminal: never in CI logs or redirected output.
+if [ -t 1 ]; then
+  echo "Primo accesso:   utente admin, password $(grep '^ADMIN_PASSWORD=' .env | cut -d= -f2)"
+  echo "                 (vale solo finché non la cambi da 'Il mio account')"
+  echo "Token export AI: $(grep '^EXPORT_TOKEN=' .env | cut -d= -f2)"
+else
+  echo "Password iniziale e token export: in $(pwd)/.env (non stampati in modalità non interattiva)"
+fi
 echo "Password dimenticata: docker exec -it zerodark-console-console-1 node server/cli.js reset-password <utente>"
