@@ -44,10 +44,15 @@ jobs:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '/opt/zerodark-console' }}
         run: |
           mkdir -p ~/.ssh
-          # Keys pasted from a Windows terminal often carry CR characters or trailing spaces: strip them.
-          printf '%s\n' "$SSH_KEY" | tr -d '\r' | sed -e 's/[[:space:]]*$//' -e '/^$/d' > ~/.ssh/id && chmod 600 ~/.ssh/id
+          # Accepts the key as-is (-----BEGIN ... -----END) or as one base64 line (base64 -w0 keyfile),
+          # which survives copy/paste from a terminal. CR characters and trailing spaces are stripped.
+          KEY=$(printf '%s\n' "$SSH_KEY" | tr -d '\r')
+          if ! printf '%s' "$KEY" | grep -q -- '-----BEGIN'; then
+            KEY=$(printf '%s' "$KEY" | tr -d '[:space:]' | base64 -d 2>/dev/null | tr -d '\r' || true)
+          fi
+          printf '%s\n' "$KEY" | sed -e 's/[[:space:]]*$//' -e '/^$/d' > ~/.ssh/id && chmod 600 ~/.ssh/id
           if ! ssh-keygen -y -f ~/.ssh/id > /dev/null; then
-            echo "::error::DEPLOY_SSH_KEY non è una chiave privata valida. Ricopiala intera (da -----BEGIN a -----END, righe comprese) da: cat /root/.ssh/github_deploy"
+            echo "::error::DEPLOY_SSH_KEY non è una chiave privata valida. Sul server esegui: base64 -w0 /root/.ssh/github_deploy ; e incolla l'unica riga stampata nel secret."
             exit 1
           fi
           ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
