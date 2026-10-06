@@ -69,6 +69,8 @@ Senza Docker: `ADMIN_PASSWORD=... PUBLIC_URL=https://console.zerodarkteam.it npm
 | `OFFLINE_AFTER` | `300` | secondi senza dati prima di segnare un server offline |
 | `PUBLIC_URL` | dall'header Host | URL usato nei comandi di installazione |
 | `DB_FILE` | `data/console.db` | percorso del database SQLite |
+| `PORTAL_DOMAIN` | `zerodarkteam.it` | dominio dei portali creati senza dominio esplicito |
+| `HEALTH_INTERVAL` | `300` | secondi tra i controlli `https://<dominio>/login` dei portali (0 = spento) |
 | `TZ` | — | fuso orario per i profili orari (es. `Europe/Rome`) |
 
 ## Utenti
@@ -117,6 +119,17 @@ accumula fino a 24h di campioni e li reinvia. Configurazione in `/etc/zdt-agent/
 - `process`: regex sulla command line dei processi
 
 Test locale senza inviare nulla: `python3 zdt-agent.py --print`.
+
+### Portali del gestionale
+
+Gli script veri stanno nel repository del gestionale (`whiskas85/team-management`, cartella `deploy/console-hooks/`, dettagli in `deploy/DEPLOY.md` → «Dalla console ZeroDark»). Sul server si installano una volta:
+
+```bash
+ln -sf /opt/gestionale/deploy/console-hooks/create_app /etc/zdt-agent/hooks/create_app
+ln -sf /opt/gestionale/deploy/console-hooks/remove_app /etc/zdt-agent/hooks/remove_app
+```
+
+Dalla console, **Nuova app → Portale**: nome (minuscole, numeri, trattini; `ops`, `test*` e `www` sono riservati, per una prova `demo`), dominio (vuoto = `<nome>.zerodarkteam.it`, configurabile con `PORTAL_DOMAIN`) ed email dell'admin (`ZDT_APP_EMAIL`). L'app viene monitorata da subito sui container `^zd-sq-<nome>-`. La password dell'admin resta sul server in `/opt/squadra-<nome>/ACCESSO.txt`. Ogni 5 minuti (`HEALTH_INTERVAL`) la console verifica che `https://<dominio>/login` risponda 200 e lo mostra nella tabella delle app.
 
 ### Creazione app (hook)
 

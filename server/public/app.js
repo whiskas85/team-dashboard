@@ -328,7 +328,8 @@ async function renderServer(id) {
     }));
     main.querySelectorAll('[data-del-app]').forEach((b) => (b.onclick = async () => {
       const app = s.apps.find((a) => a.id === Number(b.dataset.delApp));
-      const deprov = confirm(`Rimuovere "${app.name}" anche dal server (esegue l'hook remove_app)?\n\nOK = rimuovi dal server · Annulla = scegli se smettere solo di monitorarla`);
+      const what = app.type === 'portal' ? 'Fa un backup finale, ferma i container, stacca il sito e archivia la cartella in /opt/archivio. I volumi restano.' : "Esegue lo script remove_app sul server.";
+      const deprov = confirm(`Rimuovere "${app.name}" anche dal server?\n${what}\n\nOK = rimuovi dal server · Annulla = scegli se smettere solo di monitorarla`);
       if (!deprov && !confirm(`Smettere di monitorare "${app.name}" senza toccare il server?`)) return;
       await api(`/api/apps/${app.id}${deprov ? '?deprovision=1' : ''}`, { method: 'DELETE' });
       load();
@@ -355,10 +356,20 @@ function appsTable(apps) {
       <td class="r">${a.latest ? fmt.mb(a.latest.mem_mb) : '–'}</td>
       <td class="r">${a.last24h.cpu_avg == null ? '–' : fmt.cores(a.last24h.cpu_avg / 100)}</td>
       <td class="r">${fmt.mb(a.last24h.mem_max)}</td>
-      <td>${a.domain ? esc(a.domain) : '<span class="muted">–</span>'}${a.port ? `<span class="muted">:${a.port}</span>` : ''}</td>
+      <td>${a.domain ? (a.type === 'portal' ? `<a href="https://${esc(a.domain)}" target="_blank" rel="noopener">${esc(a.domain)}</a>` : esc(a.domain)) : '<span class="muted">–</span>'}${a.port ? `<span class="muted">:${a.port}</span>` : ''}${healthBadge(a)}</td>
       <td class="r"><button class="small danger admin-only" data-del-app="${a.id}" aria-label="Rimuovi ${esc(a.name)}">Rimuovi</button></td>
     </tr>`).join('')}</tbody></table></div>
     <p class="muted" style="font-size:12px;margin:10px 0 0">CPU in core (1,00 = un core pieno). Clicca su un'app per vederne l'andamento.</p>`;
+}
+
+// Portals only: result of the periodic GET https://<domain>/login (must be 200).
+function healthBadge(a) {
+  if (a.type !== 'portal' || a.status !== 'active' || !a.domain) return '';
+  const when = a.health_at ? ` · verificato ${ago(a.health_at)}` : '';
+  if (!a.health) return `<div>${badge('pending', 'Sito: in verifica')}</div>`;
+  if (a.health === 'ok') return `<div title="/login risponde 200${esc(when)}">${badge('ok', 'Sito raggiungibile')}</div>`;
+  const why = a.health_code ? `risponde ${a.health_code}` : 'non raggiungibile (DNS o certificato non ancora pronti?)';
+  return `<div title="/login ${esc(why)}${esc(when)}">${badge('critical', a.health_code ? `Sito: errore ${a.health_code}` : 'Sito non raggiungibile')}</div>`;
 }
 
 async function showApp(app) {
@@ -372,36 +383,63 @@ async function showApp(app) {
 }
 
 function newAppModal(server, onDone) {
+  const suffix = state.me.portal_domain || 'zerodarkteam.it';
   modal(`
     <h2>Nuova app su ${esc(server.name)}</h2>
     <form id="f">
-      <div class="field"><label for="n">Nome app</label><input id="n" required pattern="[a-zA-Z0-9][a-zA-Z0-9._\\-]{0,62}" placeholder="es. ops-cliente-rossi"></div>
-      <div class="inline-fields" style="margin-bottom:14px">
-        <div class="field" style="flex:1"><label for="t">Tipo</label><select id="t"><option value="portal">Portale</option><option value="service">Servizio</option><option value="other">Altro</option></select></div>
-        <div class="field" style="flex:1"><label for="k">Esecuzione</label><select id="k"><option value="docker">Docker</option><option value="systemd">Servizio systemd</option><option value="process">Processo</option></select></div>
+      <div class="field"><label for="t">Tipo</label><select id="t"><option value="portal">Portale (gestionale)</option><option value="service">Servizio</option><option value="other">Altro</option></select></div>
+      <div class="field"><label for="n">Nome</label><input id="n" required autocomplete="off" placeholder="es. rossi"><small id="n-hint"></small></div>
+      <div class="portal-only">
+        <div class="field"><label for="d">Dominio</label><input id="d" autocomplete="off"><small>Vuoto = <code id="d-default"></code>. Se il DNS non punta ancora al server, il portale nasce lo stesso e il sito si attiva quando il record c'è.</small></div>
+        <div class="field"><label for="em">Email dell'amministratore (opzionale)</label><input id="em" type="email" autocomplete="off" placeholder="admin@cliente.it"></div>
+        <p class="muted" style="font-size:13px;margin:0 0 14px">Crea database, app e WhatsApp del gestionale con le immagini della produzione, partendo da un database vuoto. La password dell'admin non compare in console: resta sul server in <code id="acc"></code>.</p>
       </div>
-      <div class="inline-fields" style="margin-bottom:14px">
-        <div class="field" style="flex:2"><label for="d">Dominio</label><input id="d" placeholder="cliente.zerodarkteam.it"></div>
-        <div class="field" style="flex:1"><label for="p">Porta</label><input id="p" type="number" min="1" max="65535" placeholder="8080"></div>
+      <div class="other-only" hidden>
+        <div class="inline-fields" style="margin-bottom:14px">
+          <div class="field" style="flex:1"><label for="k">Esecuzione</label><select id="k"><option value="docker">Docker</option><option value="systemd">Servizio systemd</option><option value="process">Processo</option></select></div>
+          <div class="field" style="flex:1"><label for="p">Porta</label><input id="p" type="number" min="1" max="65535"></div>
+        </div>
+        <div class="field"><label for="d2">Dominio (opzionale)</label><input id="d2" autocomplete="off"></div>
+        <div class="field"><label for="mt">Criterio di monitoraggio (opzionale)</label><input id="mt" placeholder="regex su nome container / processo, oppure unit systemd"><small>Vuoto = nome dell'app.</small></div>
       </div>
-      <div class="field"><label for="tpl">Template</label><input id="tpl" value="portal"><small>Cartella in <code>/etc/zdt-agent/templates/</code> usata dall'hook <code>create_app</code>.</small></div>
-      <div class="field"><label for="mt">Criterio di monitoraggio (opzionale)</label><input id="mt" placeholder="regex su nome container / processo, oppure unit systemd"><small>Vuoto = nome dell'app. L'hook può aggiornarlo dopo la creazione.</small></div>
-      <div class="field"><label style="display:flex;gap:8px;align-items:center;color:var(--ink)"><input id="pv" type="checkbox" checked style="width:auto"> Crea l'app sul server (esegue l'hook <code>create_app</code> tramite l'agent)</label>
+      <div class="field"><label style="display:flex;gap:8px;align-items:center;color:var(--ink)"><input id="pv" type="checkbox" checked style="width:auto"> Crea sul server (lo script <code>create_app</code> viene eseguito dall'agent)</label>
         <small>Se disattivato, l'app viene solo registrata e monitorata.</small></div>
       <div class="err" id="e"></div>
-      <div class="modal-actions"><button type="button" data-close>Annulla</button><button class="primary">Crea app</button></div>
+      <div class="modal-actions"><button type="button" data-close>Annulla</button><button class="primary">Crea</button></div>
     </form>`, (m, close) => {
-    const v = (id) => m.querySelector(id).value.trim();
-    m.querySelector('#f').onsubmit = async (e) => {
+    const $ = (id) => m.querySelector(id);
+    const v = (id) => $(id).value.trim();
+    const isPortal = () => $('#t').value === 'portal';
+    const refresh = () => {
+      const portal = isPortal();
+      m.querySelector('.portal-only').hidden = !portal;
+      m.querySelector('.other-only').hidden = portal;
+      const name = v('#n').toLowerCase();
+      $('#d-default').textContent = `${name || '<nome>'}.${suffix}`;
+      $('#d').placeholder = `${name || '<nome>'}.${suffix}`;
+      $('#acc').textContent = `/opt/squadra-${name || '<nome>'}/ACCESSO.txt`;
+      let hint = '';
+      if (portal && name) {
+        if (/^(ops|www|test.*)$/.test(name)) hint = 'Nome riservato (ops, test*, www). Per una prova usa "demo".';
+        else if (!/^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$/.test(name)) hint = 'Solo minuscole, numeri e trattini: diventa il sottodominio.';
+      }
+      $('#n-hint').textContent = hint;
+      $('#n-hint').style.color = hint ? 'var(--crit-ink)' : '';
+    };
+    $('#t').onchange = refresh;
+    $('#n').oninput = refresh;
+    refresh();
+    $('#f').onsubmit = async (e) => {
       e.preventDefault();
+      const portal = isPortal();
+      const body = portal
+        ? { type: 'portal', name: v('#n').toLowerCase(), domain: v('#d') || null, email: v('#em') || null, provision: $('#pv').checked }
+        : { type: v('#t'), name: v('#n'), kind: v('#k'), port: v('#p') ? Number(v('#p')) : null, domain: v('#d2') || null, match: v('#mt') || null, provision: $('#pv').checked };
       try {
-        await api(`/api/servers/${server.id}/apps`, {
-          method: 'POST',
-          body: { name: v('#n'), type: v('#t'), kind: v('#k'), domain: v('#d') || null, port: v('#p') ? Number(v('#p')) : null, template: v('#tpl') || null, match: v('#mt') || null, provision: m.querySelector('#pv').checked },
-        });
+        await api(`/api/servers/${server.id}/apps`, { method: 'POST', body });
         close();
         onDone();
-      } catch (err) { m.querySelector('#e').textContent = err.message; }
+      } catch (err) { $('#e').textContent = err.message; }
     };
   });
 }
