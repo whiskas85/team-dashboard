@@ -117,7 +117,7 @@ function versionBadge() {
 // Auto-refresh every `ms`; while `fast()` is true (an app is being archived, deleted or created by
 // the agent) refresh every few seconds, so the change shows up without reloading the page.
 const BUSY = ['pending', 'provisioning', 'removing', 'purging'];
-const anyBusy = (apps) => apps.some((a) => BUSY.includes(a.status) || a.credentials?.status === 'resetting');
+const anyBusy = (apps) => apps.some((a) => BUSY.includes(a.status) || a.credentials?.status === 'resetting' || a.update?.running);
 function setRefresh(fn, ms = 60000, fast = null) {
   clearInterval(state.timer);
   if (!fn) { state.timer = null; return; }
@@ -326,7 +326,7 @@ async function renderServer(id) {
 
       ${s.tasks.length ? `<div class="section"><h2>Operazioni recenti</h2><div class="card table-wrap"><table>
         <thead><tr><th>#</th><th>Operazione</th><th>App</th><th>Stato</th><th>Esito</th><th>Aggiornato</th></tr></thead><tbody>
-        ${s.tasks.map((t) => `<tr><td class="muted">${t.id}</td><td>${esc({ create_app: 'Creazione', remove_app: 'Archiviazione', purge_app: 'Eliminazione definitiva' }[t.action] || t.action)}</td><td>${esc(t.app_name || JSON.parse(t.payload).name)}</td>
+        ${s.tasks.map((t) => `<tr><td class="muted">${t.id}</td><td>${esc({ create_app: 'Creazione', remove_app: 'Archiviazione', purge_app: 'Eliminazione definitiva', set_admin_password: 'Nuova password', update_app: `Aggiornamento a ${JSON.parse(t.payload).version || '?'}`, list_versions: 'Controllo versioni' }[t.action] || t.action)}</td><td>${esc(t.app_name || JSON.parse(t.payload).name)}</td>
           <td>${badge(t.status)}</td><td class="mono" style="max-width:420px;white-space:pre-wrap">${esc((t.message || '').slice(-300))}</td><td class="muted">${ago(t.updated_at)}</td></tr>`).join('')}
         </tbody></table></div></div>` : ''}`;
 
@@ -365,6 +365,7 @@ async function renderServer(id) {
     }));
     main.querySelectorAll('details[data-cred]').forEach((d) => d.addEventListener('toggle', () => d.open && loadCredentials(d)));
     wireCredentialReset(main, load);
+    main.querySelectorAll('[data-update-app]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); updateModal(s.apps.find((a) => a.id === Number(b.dataset.updateApp)), load); }));
     main.querySelectorAll('[data-edit-app]').forEach((b) => (b.onclick = () => editAppModal(s.apps.find((a) => a.id === Number(b.dataset.editApp)), load)));
     main.querySelectorAll('[data-del-app]').forEach((b) => (b.onclick = () => removeAppModal(s.apps.find((a) => a.id === Number(b.dataset.delApp)), load)));
     const sel = s.apps.find((a) => a.id === state.selectedApp);
@@ -382,7 +383,7 @@ function appsTable(apps) {
   return `<div class="table-wrap"><table>
     <thead><tr><th>App</th><th>Tipo</th><th>Stato</th><th class="r">CPU ora</th><th class="r">RAM ora</th><th class="r">CPU media 24h</th><th class="r">RAM max 24h</th><th>Dominio</th><th></th></tr></thead>
     <tbody>${apps.map((a) => `<tr class="clickable" data-app="${a.id}">
-      <td><b>${esc(a.name)}</b><div class="muted mono" style="font-size:11.5px">${esc(a.kind)}: ${esc(a.match || '')}</div></td>
+      <td><b>${esc(a.name)}</b><div class="muted mono" style="font-size:11.5px">${esc(a.kind)}: ${esc(a.match || '')}</div>${versionInfo(a, { compact: true })}</td>
       <td>${esc({ portal: 'Portale', service: 'Servizio', other: 'Altro' }[a.type] || a.type)}</td>
       <td>${badge(a.status)}${a.status === 'error' && a.status_msg ? `<div class="muted" style="font-size:12px;max-width:240px">${esc(a.status_msg.slice(-120))}</div>` : ''}</td>
       <td class="r">${a.latest ? fmt.cores(a.latest.cpu_pct / 100) : '–'}</td>
@@ -390,7 +391,7 @@ function appsTable(apps) {
       <td class="r">${a.last24h.cpu_avg == null ? '–' : fmt.cores(a.last24h.cpu_avg / 100)}</td>
       <td class="r">${fmt.mb(a.last24h.mem_max)}</td>
       <td>${a.domain ? (a.type === 'portal' ? `<a href="https://${esc(a.domain)}" target="_blank" rel="noopener">${esc(a.domain)}</a>` : esc(a.domain)) : '<span class="muted">–</span>'}${a.port ? `<span class="muted">:${a.port}</span>` : ''}${healthBadge(a)}</td>
-      <td class="r"><div class="row" style="justify-content:flex-end;flex-wrap:nowrap"><button class="small admin-only" data-edit-app="${a.id}" aria-label="Modifica ${esc(a.name)}">Modifica</button><button class="small danger admin-only" data-del-app="${a.id}" aria-label="Rimuovi ${esc(a.name)}">Rimuovi</button></div></td>
+      <td class="r"><div class="row" style="justify-content:flex-end;flex-wrap:nowrap">${a.update && a.status === 'active' ? `<button class="small admin-only${a.update.behind && !a.update.running ? ' primary' : ''}" data-update-app="${a.id}">Aggiorna</button>` : ''}<button class="small admin-only" data-edit-app="${a.id}" aria-label="Modifica ${esc(a.name)}">Modifica</button><button class="small danger admin-only" data-del-app="${a.id}" aria-label="Rimuovi ${esc(a.name)}">Rimuovi</button></div></td>
     </tr>${credentialsRow(a)}`).join('')}</tbody></table></div>
     <p class="muted" style="font-size:12px;margin:10px 0 0">CPU in core (1,00 = un core pieno). Clicca su un'app per vederne l'andamento.</p>`;
 }
@@ -408,6 +409,19 @@ function healthBadge(a) {
   // "Verifica ora" only while there is something to wait for: a healthy site needs no button.
   const retry = a.health === 'ok' ? '' : `<button class="small" data-health="${a.id}" title="Ricontrolla adesso">Verifica ora</button>`;
   return `<div class="row" style="gap:6px;margin-top:4px">${b}${retry}</div>${why}`;
+}
+
+// Gestionale version of a portal, with what the update machinery is doing about it.
+function versionInfo(a, { compact = false } = {}) {
+  const u = a.update;
+  if (!u) return a.version ? `<span class="muted mono" style="font-size:12px">v${esc(a.version)}</span>` : '';
+  const cur = a.version ? `<span class="mono">v${esc(a.version)}</span>` : '<span class="muted">versione ?</span>';
+  let state = '';
+  if (u.running) state = badge('warning', `${u.running.status === 'sent' ? 'Aggiornamento' : 'In coda'} → ${u.running.version}`);
+  else if (u.last && !u.last.ok && u.last.at > Date.now() / 1000 - 7 * 86400 && a.version !== u.last.version) state = `<span title="${esc(u.last.message || '')}">${badge('critical', u.last.rolled_back ? `${u.last.version} non riuscita · tornato indietro` : `Aggiornamento a ${u.last.version} fallito`)}</span>`;
+  else if (u.behind) state = badge('info', `Disponibile ${u.latest}`);
+  const auto = u.auto && !compact ? '<span class="muted" style="font-size:11.5px" title="Aggiornamento automatico notturno">auto</span>' : '';
+  return `<div class="row" style="gap:6px;flex-wrap:wrap;align-items:center">${cur}${state}${auto}</div>`;
 }
 
 // First-access credentials of portals created by the console: collapsed, admins only, fetched on open.
@@ -703,6 +717,7 @@ function wireAppActions(main, apps, reload) {
   main.querySelectorAll('[data-del-app]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); removeAppModal(byId(b.dataset.delApp), reload); }));
   main.querySelectorAll('[data-purge]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); purgeAppModal(byId(b.dataset.purge), reload); }));
   main.querySelectorAll('[data-cred-open]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); credentialsModal(byId(b.dataset.credOpen), reload); }));
+  main.querySelectorAll('[data-update-app]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); updateModal(byId(b.dataset.updateApp), reload); }));
   main.querySelectorAll('[data-health]').forEach((b) => (b.onclick = async (e) => {
     e.stopPropagation();
     b.disabled = true;
@@ -717,6 +732,7 @@ function wireAppActions(main, apps, reload) {
 }
 
 const appActions = (a) => `<div class="row actions">
+  ${a.update && a.status === 'active' ? `<button class="small admin-only${a.update.behind && !a.update.running ? ' primary' : ''}" data-update-app="${a.id}">Aggiorna</button>` : ''}
   ${hasAccess(a) ? `<button class="small admin-only" data-cred-open="${a.id}">🔑 Accesso</button>` : ''}
   <button class="small admin-only" data-edit-app="${a.id}">Modifica</button>
   <button class="small danger admin-only" data-del-app="${a.id}">Rimuovi</button></div>`;
@@ -727,24 +743,43 @@ async function renderPortals() {
   const load = async () => {
     const apps = await api('/api/apps?view=portals');
     busy = anyBusy(apps);
+    const behind = apps.filter((a) => a.update?.behind && !a.update.running && a.status === 'active');
     main.innerHTML = `${homeTabs('portals')}
-      <div class="page-head"><div><h1>Portali</h1><p>${apps.length} portali attivi · per crearne uno: apri un server → <b>+ Nuova app</b></p></div></div>
+      <div class="page-head"><div><h1>Portali</h1><p>${apps.length} portali attivi · per crearne uno: apri un server → <b>+ Nuova app</b></p></div>
+        <div class="row admin-only">${apps.some((a) => a.update) ? '<button class="small" id="check-versions" title="Chiede ai server quali versioni del gestionale hanno">Controlla versioni</button>' : ''}
+        ${behind.length ? `<button class="small primary" id="update-all">Aggiorna tutti (${behind.length})</button>` : ''}</div></div>
       ${!apps.length ? '<div class="card empty-state"><p>Nessun portale. Apri un server e usa <b>+ Nuova app → Portale</b>.</p></div>' : `
       <div class="card table-wrap desktop-only"><table>
-        <thead><tr><th>Portale</th><th>Server</th><th>Stato</th><th>Sito</th><th class="r">CPU · RAM ora</th><th></th></tr></thead>
+        <thead><tr><th>Portale</th><th>Server</th><th>Stato</th><th>Versione</th><th>Sito</th><th class="r">CPU · RAM ora</th><th></th></tr></thead>
         <tbody>${apps.map((a) => `<tr class="clickable" data-goto-server="${a.server_id}">
           <td><b>${esc(a.name)}</b><div>${domainLink(a)}</div></td>
           <td>${esc(a.server_name)}</td>
           <td>${badge(a.status)}</td>
+          <td>${versionInfo(a) || '<span class="muted">–</span>'}</td>
           <td>${healthBadge(a) || '<span class="muted">–</span>'}</td>
           <td class="r">${usage(a)}</td>
           <td class="r">${appActions(a)}</td></tr>`).join('')}</tbody></table></div>
       <div class="grid mobile-only">${apps.map((a) => `<div class="card portal-card" data-goto-server="${a.server_id}">
           <div class="card-head"><div><h2>${esc(a.name)}</h2><div style="font-size:13px">${domainLink(a)}</div></div>${badge(a.status)}</div>
-          ${healthBadge(a)}
+          ${healthBadge(a)}${versionInfo(a)}
           <div class="meta"><span>${esc(a.server_name)}</span><span>${usage(a)}</span></div>
           ${appActions(a)}</div>`).join('')}</div>`}`;
     wireAppActions(main, apps, load);
+    const check = main.querySelector('#check-versions');
+    if (check) check.onclick = async () => {
+      check.disabled = true;
+      check.textContent = 'Chiedo ai server…';
+      try { await api('/api/updates/check', { method: 'POST' }); check.textContent = 'Richiesta inviata: risposta entro un paio di minuti'; } catch (e) { check.textContent = e.message; }
+      busy = true;
+      setRefresh(load, 60000, () => busy);
+    };
+    const all = main.querySelector('#update-all');
+    if (all) all.onclick = async () => {
+      if (!confirm(`Aggiornare ${behind.map((a) => `${a.name} (${a.version} → ${a.update.latest})`).join(', ')}?\n\nUno alla volta per server: backup, cambio versione, controllo. Se un gestionale non risponde torna da solo alla versione di prima. Ogni sito resta fermo circa un minuto.`)) return;
+      all.disabled = true;
+      try { await api('/api/updates/all', { method: 'POST' }); } catch (e) { alert(e.message); }
+      load();
+    };
   };
   await load();
   setRefresh(load, 60000, () => busy);
@@ -875,6 +910,85 @@ function purgeAppModal(app, onDone) {
     go.onclick = async () => {
       try { await api(`/api/apps/${app.id}/purge`, { method: 'POST', body: { confirm: cf.value.trim() } }); close(); onDone(); } catch (e) { m.querySelector('#e').textContent = e.message; }
     };
+  });
+}
+
+// Versions & updates of a squad's gestionale: manual update (also back), nightly automatic updates, history.
+function updateModal(app, reload) {
+  if (!app) return;
+  modal(`<h2>Aggiornamenti · ${esc(app.name)}</h2><div id="u-body"><p class="muted">Caricamento…</p></div>
+    <div class="modal-actions"><button type="button" data-close>Chiudi</button></div>`, async (m, close) => {
+    const box = m.querySelector('#u-body');
+    const draw = async () => {
+      let d;
+      try { d = await api(`/api/apps/${app.id}/updates`); } catch (e) { box.innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+      const u = d.update || {};
+      const notes = (v) => `<a href="${esc(d.releases_url + v)}" target="_blank" rel="noopener">novità della ${esc(v)} ↗</a>`;
+      const label = (v) => `${v}${v === d.latest ? ' · più recente' : ''}${v === d.version ? ' · in uso' : ''}`;
+      const hour = `${String(d.update_hour).padStart(2, '0')}:00`;
+      const STATUS = { queued: 'In coda', sent: 'In corso', done: 'Fatto', failed: 'Non riuscito' };
+      box.innerHTML = `
+        <div class="cred-grid" style="margin-bottom:14px">
+          <span class="muted">In uso</span><span>${d.version ? `<b class="mono">${esc(d.version)}</b> ${notes(d.version)}` : '<span class="muted">non ancora nota (la chiede al server)</span>'}</span>
+          <span class="muted">Più recente</span><span>${d.latest ? `<b class="mono">${esc(d.latest)}</b> ${d.latest !== d.version ? notes(d.latest) : ''}` : '<span class="muted">–</span>'}
+            <span class="muted" style="font-size:12px">${d.versions_at ? ` · chiesto ${ago(d.versions_at)}` : ''}</span></span>
+        </div>
+        ${d.versions_error ? `<p class="err" style="font-size:13px">Il server non ha risposto sulle versioni: ${esc(d.versions_error)}</p>` : ''}
+        ${u.running ? `<p>${badge('warning', `${u.running.status === 'sent' ? 'Aggiornamento in corso' : 'In coda'} → ${u.running.version}`)} <span class="muted" style="font-size:13px">Backup, cambio versione e controllo: di solito un paio di minuti.</span></p>` : `
+        <form id="u-f" class="admin-only">
+          <div class="field"><label for="u-v">Porta a</label>
+            ${d.available.length ? `<select id="u-v">${d.available.map((v) => `<option value="${esc(v)}" ${v === (d.latest || d.version) ? 'selected' : ''}>${esc(label(v))}</option>`).join('')}</select>`
+              : '<p class="muted" style="margin:0">Il server non ha ancora detto quali versioni ha pronte. <button type="button" class="small" id="u-check">Chiedi adesso</button></p>'}
+            <small id="u-hint"></small></div>
+          <p class="muted" style="font-size:13px;margin:0 0 12px">Sul server: backup del database, cambio versione, controllo che il gestionale risponda. Se entro un minuto e mezzo non risponde torna <b>da solo</b> alla versione di prima, con il database di prima. Il sito resta fermo circa un minuto.</p>
+          <div class="err" id="u-e"></div>
+          ${d.available.length ? '<div class="row"><button class="primary" id="u-go">Aggiorna</button></div>' : ''}
+        </form>`}
+        <label class="admin-only" style="display:flex;gap:10px;margin:16px 0 4px;align-items:flex-start;cursor:pointer;font-weight:400">
+          <input type="checkbox" id="u-auto" ${u.auto ? 'checked' : ''} style="width:auto;margin-top:3px;flex:none">
+          <span><b>Aggiornamento automatico</b><br><span class="muted" style="font-size:13px">Ogni notte alle ${hour} (${esc(d.time_zone)}) porta il gestionale alla versione più recente. Una versione che non è riuscita non viene ritentata da sola.</span></span>
+        </label>
+        ${d.history.length ? `<h3 style="margin:18px 0 8px">Storico</h3><div class="table-wrap"><table>
+          <thead><tr><th>Quando</th><th>Versione</th><th>Da chi</th><th>Esito</th></tr></thead><tbody>
+          ${d.history.map((h) => `<tr><td class="muted">${esc(fmt.dateTime(h.finished_at || h.created_at))}</td>
+            <td class="mono">${h.from ? `${esc(h.from)} → ` : ''}${esc(h.version)}</td>
+            <td>${h.auto ? 'automatico' : esc(h.by || '–')}</td>
+            <td>${badge(h.status === 'done' ? 'done' : h.status === 'failed' ? 'failed' : 'pending', h.rolled_back ? 'Tornato indietro' : STATUS[h.status] || h.status)}
+              ${h.message ? `<details><summary class="muted" style="font-size:12px">dettagli</summary><pre class="mono" style="white-space:pre-wrap;font-size:11.5px;max-width:420px">${esc(h.message)}</pre></details>` : ''}</td></tr>`).join('')}
+          </tbody></table></div>` : ''}`;
+      const sel = box.querySelector('#u-v');
+      const hint = box.querySelector('#u-hint');
+      const go = box.querySelector('#u-go');
+      const sync = () => {
+        if (!sel) return;
+        const v = sel.value;
+        go.textContent = v === d.version ? 'Già in uso' : `Aggiorna a ${v}`;
+        go.disabled = v === d.version;
+        const back = d.version && v !== d.version && d.available.indexOf(v) > d.available.indexOf(d.version);
+        hint.innerHTML = `${notes(v)}${back ? ' · <b>è una versione precedente</b>: il database resta quello di oggi, usala solo se quella nuova dà problemi.' : ''}`;
+      };
+      if (sel) { sel.onchange = sync; sync(); }
+      const f = box.querySelector('#u-f');
+      if (f) f.onsubmit = async (e) => {
+        e.preventDefault();
+        if (!sel) return;
+        go.disabled = true;
+        try {
+          await api(`/api/apps/${app.id}/update`, { method: 'POST', body: { version: sel.value } });
+          reload && reload();
+          draw();
+        } catch (err) { box.querySelector('#u-e').textContent = err.message; go.disabled = false; }
+      };
+      const check = box.querySelector('#u-check');
+      if (check) check.onclick = async () => {
+        check.disabled = true;
+        try { await api('/api/updates/check', { method: 'POST' }); check.textContent = 'Chiesto: riapri tra un paio di minuti'; } catch (err) { check.textContent = err.message; }
+      };
+      box.querySelector('#u-auto').onchange = async (e) => {
+        try { await api(`/api/apps/${app.id}/auto-update`, { method: 'POST', body: { enabled: e.target.checked } }); reload && reload(); } catch (err) { alert(err.message); e.target.checked = !e.target.checked; }
+      };
+    };
+    draw();
   });
 }
 
