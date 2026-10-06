@@ -39,7 +39,7 @@ function ago(ts) {
 const STATUS_LABEL = {
   ok: 'OK', info: 'Info', warning: 'Attenzione', critical: 'Critico', offline: 'Offline', online: 'Online',
   active: 'Attiva', pending: 'In coda', provisioning: 'In creazione', error: 'Errore', removing: 'In rimozione',
-  queued: 'In coda', sent: 'Inviato', done: 'Completato', failed: 'Fallito',
+  queued: 'In coda', sent: 'Inviato', done: 'Completato', failed: 'Fallito', archived: 'Archiviata', purging: 'In eliminazione',
 };
 const badge = (st, label) => `<span class="badge st-${esc(st)}"><i class="dot"></i>${esc(label || STATUS_LABEL[st] || st)}</span>`;
 
@@ -73,7 +73,7 @@ function shell(active, content) {
       <a class="brand" href="#/"><span class="logo">Z</span><span>ZeroDark Console</span></a>
       ${versionBadge()}
       <nav class="nav">
-        <a href="#/" class="${active === 'servers' ? 'active' : ''}">Server</a>
+        <a href="#/" class="${active === 'servers' ? 'active' : ''}">Dashboard</a>
         <a href="#/analysis" class="${active === 'analysis' ? 'active' : ''}">Capacità & combinazioni</a>
         ${isAdmin() ? `<a href="#/users" class="${active === 'users' ? 'active' : ''}">Utenti</a>` : ''}
       </nav>
@@ -165,6 +165,7 @@ async function renderOverview() {
     const statusOf = Object.fromEntries((analysis?.servers || []).map((s) => [s.id, s]));
     const v = analysis && VERDICT[analysis.fleet.verdict];
     main.innerHTML = `
+      ${homeTabs('overview')}
       <div class="page-head">
         <div><h1>Server</h1><p>${servers.length} server monitorati · aggiornamento automatico ogni minuto</p></div>
         <button class="primary admin-only" id="add">+ Aggiungi server</button>
@@ -295,7 +296,7 @@ async function renderServer(id) {
 
       ${s.tasks.length ? `<div class="section"><h2>Operazioni recenti</h2><div class="card table-wrap"><table>
         <thead><tr><th>#</th><th>Operazione</th><th>App</th><th>Stato</th><th>Esito</th><th>Aggiornato</th></tr></thead><tbody>
-        ${s.tasks.map((t) => `<tr><td class="muted">${t.id}</td><td>${t.action === 'create_app' ? 'Creazione app' : 'Rimozione app'}</td><td>${esc(t.app_name || JSON.parse(t.payload).name)}</td>
+        ${s.tasks.map((t) => `<tr><td class="muted">${t.id}</td><td>${esc({ create_app: 'Creazione', remove_app: 'Archiviazione', purge_app: 'Eliminazione definitiva' }[t.action] || t.action)}</td><td>${esc(t.app_name || JSON.parse(t.payload).name)}</td>
           <td>${badge(t.status)}</td><td class="mono" style="max-width:420px;white-space:pre-wrap">${esc((t.message || '').slice(-300))}</td><td class="muted">${ago(t.updated_at)}</td></tr>`).join('')}
         </tbody></table></div></div>` : ''}`;
 
@@ -334,21 +335,7 @@ async function renderServer(id) {
     }));
     main.querySelectorAll('details[data-cred]').forEach((d) => d.addEventListener('toggle', () => d.open && loadCredentials(d)));
     main.querySelectorAll('[data-edit-app]').forEach((b) => (b.onclick = () => editAppModal(s.apps.find((a) => a.id === Number(b.dataset.editApp)), load)));
-    main.querySelectorAll('[data-del-app]').forEach((b) => (b.onclick = async () => {
-      const app = s.apps.find((a) => a.id === Number(b.dataset.delApp));
-      if (!app.provisioned) {
-        if (confirm(`Smettere di monitorare "${app.name}"?\n\nIl server non viene toccato: l'app non è stata creata dalla console. Se è nella configurazione dell'agent, ricomparirà al prossimo invio.`)) {
-          await api(`/api/apps/${app.id}`, { method: 'DELETE' });
-          load();
-        }
-        return;
-      }
-      const what = app.type === 'portal' ? 'Fa un backup finale, ferma i container, stacca il sito e archivia la cartella in /opt/archivio. I volumi restano.' : "Esegue lo script remove_app sul server.";
-      const deprov = confirm(`Rimuovere "${app.name}" anche dal server?\n${what}\n\nOK = rimuovi dal server · Annulla = scegli se smettere solo di monitorarla`);
-      if (!deprov && !confirm(`Smettere di monitorare "${app.name}" senza toccare il server?`)) return;
-      await api(`/api/apps/${app.id}${deprov ? '?deprovision=1' : ''}`, { method: 'DELETE' });
-      load();
-    }));
+    main.querySelectorAll('[data-del-app]').forEach((b) => (b.onclick = () => removeAppModal(s.apps.find((a) => a.id === Number(b.dataset.delApp)), load)));
     const sel = s.apps.find((a) => a.id === state.selectedApp);
     if (sel) { main.querySelector(`[data-app="${sel.id}"]`)?.classList.add('selected'); showApp(sel); }
   };
@@ -641,6 +628,193 @@ function combo(c, title, best) {
 }
 
 // ---------------------------------------------------------------------------
+// Home tabs: Panoramica · Portali · App · Archivio
+// ---------------------------------------------------------------------------
+function homeTabs(active) {
+  const tabs = [['overview', '#/', 'Panoramica'], ['portals', '#/portali', 'Portali'], ['apps', '#/app', 'App'], ['archive', '#/archivio', 'Archivio']];
+  return `<nav class="tabs" aria-label="Sezioni">${tabs.map(([k, href, label]) => `<a href="${href}" class="${k === active ? 'on' : ''}" ${k === active ? 'aria-current="page"' : ''}>${label}</a>`).join('')}</nav>`;
+}
+
+const TYPE_LABEL = { portal: 'Portale', service: 'Servizio', other: 'Altro' };
+const domainLink = (a) => (a.domain ? `<a href="https://${esc(a.domain)}" target="_blank" rel="noopener">${esc(a.domain)}</a>` : '<span class="muted">–</span>');
+const usage = (a) => (a.latest ? `${fmt.cores(a.latest.cpu_pct / 100)} · ${fmt.mb(a.latest.mem_mb)}` : '–');
+
+// Shared wiring for the action buttons rendered by the lists below.
+function wireAppActions(main, apps, reload) {
+  const byId = (id) => apps.find((a) => a.id === Number(id));
+  main.querySelectorAll('[data-edit-app]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); editAppModal(byId(b.dataset.editApp), reload); }));
+  main.querySelectorAll('[data-del-app]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); removeAppModal(byId(b.dataset.delApp), reload); }));
+  main.querySelectorAll('[data-purge]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); purgeAppModal(byId(b.dataset.purge), reload); }));
+  main.querySelectorAll('[data-cred-open]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); credentialsModal(byId(b.dataset.credOpen)); }));
+  main.querySelectorAll('[data-health]').forEach((b) => (b.onclick = async (e) => {
+    e.stopPropagation();
+    b.disabled = true;
+    b.textContent = 'Verifico…';
+    try { await api(`/api/apps/${b.dataset.health}/health`, { method: 'POST' }); } catch (err) { b.textContent = err.message; }
+    reload();
+  }));
+  main.querySelectorAll('[data-goto-server]').forEach((r) => (r.onclick = (e) => {
+    if (e.target.closest('button, a')) return;
+    location.hash = `#/server/${r.dataset.gotoServer}`;
+  }));
+}
+
+const appActions = (a) => `<div class="row actions">
+  ${a.credentials && a.credentials.status === 'applied' ? `<button class="small admin-only" data-cred-open="${a.id}">🔑 Accesso</button>` : ''}
+  <button class="small admin-only" data-edit-app="${a.id}">Modifica</button>
+  <button class="small danger admin-only" data-del-app="${a.id}">Rimuovi</button></div>`;
+
+async function renderPortals() {
+  const main = shell('servers', '<div class="loading">Caricamento…</div>');
+  const load = async () => {
+    const apps = await api('/api/apps?view=portals');
+    main.innerHTML = `${homeTabs('portals')}
+      <div class="page-head"><div><h1>Portali</h1><p>${apps.length} portali attivi · per crearne uno: apri un server → <b>+ Nuova app</b></p></div></div>
+      ${!apps.length ? '<div class="card empty-state"><p>Nessun portale. Apri un server e usa <b>+ Nuova app → Portale</b>.</p></div>' : `
+      <div class="card table-wrap desktop-only"><table>
+        <thead><tr><th>Portale</th><th>Server</th><th>Stato</th><th>Sito</th><th class="r">CPU · RAM ora</th><th></th></tr></thead>
+        <tbody>${apps.map((a) => `<tr class="clickable" data-goto-server="${a.server_id}">
+          <td><b>${esc(a.name)}</b><div>${domainLink(a)}</div></td>
+          <td>${esc(a.server_name)}</td>
+          <td>${badge(a.status)}</td>
+          <td>${healthBadge(a) || '<span class="muted">–</span>'}</td>
+          <td class="r">${usage(a)}</td>
+          <td class="r">${appActions(a)}</td></tr>`).join('')}</tbody></table></div>
+      <div class="grid mobile-only">${apps.map((a) => `<div class="card portal-card" data-goto-server="${a.server_id}">
+          <div class="card-head"><div><h2>${esc(a.name)}</h2><div style="font-size:13px">${domainLink(a)}</div></div>${badge(a.status)}</div>
+          ${healthBadge(a)}
+          <div class="meta"><span>${esc(a.server_name)}</span><span>${usage(a)}</span></div>
+          ${appActions(a)}</div>`).join('')}</div>`}`;
+    wireAppActions(main, apps, load);
+  };
+  await load();
+  setRefresh(load);
+}
+
+async function renderAllApps() {
+  const main = shell('servers', '<div class="loading">Caricamento…</div>');
+  const load = async () => {
+    const apps = await api('/api/apps?view=all');
+    main.innerHTML = `${homeTabs('apps')}
+      <div class="page-head"><div><h1>App ospitate</h1><p>${apps.length} app su tutti i server · clicca per aprire il server</p></div></div>
+      ${!apps.length ? '<div class="card empty-state"><p>Nessuna app monitorata.</p></div>' : `
+      <div class="card table-wrap desktop-only"><table>
+        <thead><tr><th>App</th><th>Tipo</th><th>Server</th><th>Stato</th><th class="r">CPU ora</th><th class="r">RAM ora</th><th class="r">RAM max 24h</th><th>Dominio</th><th></th></tr></thead>
+        <tbody>${apps.map((a) => `<tr class="clickable" data-goto-server="${a.server_id}">
+          <td><b>${esc(a.name)}</b><div class="muted mono" style="font-size:11.5px">${esc(a.kind)}: ${esc(a.match || '')}</div></td>
+          <td>${esc(TYPE_LABEL[a.type] || a.type)}</td>
+          <td>${esc(a.server_name)}</td>
+          <td>${badge(a.status)}</td>
+          <td class="r">${a.latest ? fmt.cores(a.latest.cpu_pct / 100) : '–'}</td>
+          <td class="r">${a.latest ? fmt.mb(a.latest.mem_mb) : '–'}</td>
+          <td class="r">${fmt.mb(a.last24h.mem_max)}</td>
+          <td>${domainLink(a)}</td>
+          <td class="r">${appActions(a)}</td></tr>`).join('')}</tbody></table></div>
+      <div class="grid mobile-only">${apps.map((a) => `<div class="card portal-card" data-goto-server="${a.server_id}">
+          <div class="card-head"><div><h2>${esc(a.name)}</h2><div class="muted" style="font-size:12px">${esc(TYPE_LABEL[a.type] || a.type)} · ${esc(a.server_name)}</div></div>${badge(a.status)}</div>
+          <div class="meta"><span>${domainLink(a)}</span><span>${usage(a)}</span></div>
+          ${appActions(a)}</div>`).join('')}</div>`}`;
+    wireAppActions(main, apps, load);
+  };
+  await load();
+  setRefresh(load);
+}
+
+async function renderArchive() {
+  const main = shell('servers', '<div class="loading">Caricamento…</div>');
+  const load = async () => {
+    const apps = await api('/api/apps?view=archive');
+    const when = (a) => (a.archived_at ? `${esc(fmt.dateTime(a.archived_at))}${a.archived_by ? ` · ${esc(a.archived_by)}` : ''}` : '–');
+    const note = (a) => (a.status === 'archived' && a.status_msg && /errore|fallit|non /i.test(a.status_msg) ? `<div class="err" style="font-size:12px">${esc(a.status_msg.slice(-200))}</div>` : '');
+    const purge = (a) => (a.status === 'archived' ? `<button class="small danger admin-only" data-purge="${a.id}">Elimina definitivamente</button>` : '');
+    main.innerHTML = `${homeTabs('archive')}
+      <div class="page-head"><div><h1>Archivio</h1><p>Portali rimossi dal server: container fermati e sito staccato, dati conservati nei volumi e in <code>/opt/archivio</code>.</p></div></div>
+      ${!apps.length ? '<div class="card empty-state"><p>L\'archivio è vuoto.</p></div>' : `
+      <div class="card table-wrap desktop-only"><table>
+        <thead><tr><th>Portale</th><th>Server</th><th>Archiviato</th><th>Cartella</th><th>Stato</th><th></th></tr></thead>
+        <tbody>${apps.map((a) => `<tr>
+          <td><b>${esc(a.name)}</b><div class="muted" style="font-size:12px">${esc(a.domain || '')}</div></td>
+          <td>${esc(a.server_name)}</td>
+          <td>${when(a)}</td>
+          <td class="mono" style="font-size:12px">${esc(a.archive_path || '–')}</td>
+          <td>${badge(a.status)}${note(a)}</td>
+          <td class="r">${purge(a)}</td></tr>`).join('')}</tbody></table></div>
+      <div class="grid mobile-only">${apps.map((a) => `<div class="card portal-card">
+          <div class="card-head"><div><h2>${esc(a.name)}</h2><div class="muted" style="font-size:12px">${esc(a.domain || '')} · ${esc(a.server_name)}</div></div>${badge(a.status)}</div>
+          <div class="muted" style="font-size:12px">Archiviato ${when(a)}</div>
+          <div class="mono" style="font-size:12px;word-break:break-all">${esc(a.archive_path || '')}</div>${note(a)}
+          <div class="row actions">${purge(a)}</div></div>`).join('')}</div>`}`;
+    wireAppActions(main, apps, load);
+  };
+  await load();
+  setRefresh(load);
+}
+
+// ---------------------------------------------------------------------------
+// Remove / purge / credentials dialogs
+// ---------------------------------------------------------------------------
+function removeAppModal(app, onDone) {
+  if (!app) return;
+  const canArchive = !!app.provisioned;
+  modal(`
+    <h2>Rimuovi ${esc(app.name)}</h2>
+    ${canArchive ? `
+    <div class="choice danger-choice">
+      <h3>Archivia: rimuovi dal server</h3>
+      <p class="ink2">Backup finale, container fermati, sito staccato (${esc(app.domain || 'nessun dominio')} smette di rispondere), cartella spostata in <code>/opt/archivio</code>. I dati restano nei volumi: dall'<b>Archivio</b> potrai eliminarlo definitivamente.</p>
+      <div class="field"><label for="cf">Per confermare scrivi <b>${esc(app.name)}</b></label><input id="cf" autocomplete="off"></div>
+      <button class="primary danger-btn" id="arch" disabled>Archivia ${esc(app.name)}</button>
+    </div>` : `
+    <p class="ink2">Quest'app non è stata creata dalla console: dalla console si può solo smettere di monitorarla, il server non viene toccato.${app.type === 'portal' ? '' : ''}</p>`}
+    <div class="choice">
+      <h3>Smetti solo di monitorare</h3>
+      <p class="ink2">L'app resta accesa sul server e sparisce dalla console. Se è nella configurazione dell'agent ricompare al prossimo invio.</p>
+      <button id="mon">Smetti di monitorare</button>
+    </div>
+    <div class="err" id="e"></div>
+    <div class="modal-actions"><button type="button" data-close>Annulla</button></div>`, (m, close) => {
+    const err = (t) => (m.querySelector('#e').textContent = t);
+    if (canArchive) {
+      const cf = m.querySelector('#cf');
+      const btn = m.querySelector('#arch');
+      cf.oninput = () => (btn.disabled = cf.value.trim() !== app.name);
+      btn.onclick = async () => {
+        try { await api(`/api/apps/${app.id}?deprovision=1&confirm=${encodeURIComponent(cf.value.trim())}`, { method: 'DELETE' }); close(); onDone(); } catch (e) { err(e.message); }
+      };
+    }
+    m.querySelector('#mon').onclick = async () => {
+      try { await api(`/api/apps/${app.id}`, { method: 'DELETE' }); close(); onDone(); } catch (e) { err(e.message); }
+    };
+  });
+}
+
+function purgeAppModal(app, onDone) {
+  if (!app) return;
+  modal(`
+    <h2>Elimina definitivamente ${esc(app.name)}</h2>
+    <p class="ink2">${app.provisioned
+      ? `Sul server vengono cancellati i <b>volumi dei dati</b> (database, allegati, WhatsApp) e la cartella archiviata${app.archive_path ? ` <code>${esc(app.archive_path)}</code>` : ''}. <b>Non si può annullare.</b>`
+      : 'Viene tolta solo dalla console: sul server non c\'è nulla da cancellare.'}</p>
+    <div class="field"><label for="cf">Per confermare scrivi <b>${esc(app.name)}</b></label><input id="cf" autocomplete="off"></div>
+    <div class="err" id="e"></div>
+    <div class="modal-actions"><button type="button" data-close>Annulla</button><button class="primary danger-btn" id="go" disabled>Elimina definitivamente</button></div>`, (m, close) => {
+    const cf = m.querySelector('#cf');
+    const go = m.querySelector('#go');
+    cf.oninput = () => (go.disabled = cf.value.trim() !== app.name);
+    go.onclick = async () => {
+      try { await api(`/api/apps/${app.id}/purge`, { method: 'POST', body: { confirm: cf.value.trim() } }); close(); onDone(); } catch (e) { m.querySelector('#e').textContent = e.message; }
+    };
+  });
+}
+
+function credentialsModal(app) {
+  if (!app) return;
+  modal(`<h2>Accesso iniziale · ${esc(app.name)}</h2>
+    <details data-cred="${app.id}" open style="border:0;padding:0"><summary hidden></summary><div class="cred-body" data-cred-body><p class="muted">Caricamento…</p></div></details>
+    <div class="modal-actions"><button type="button" data-close>Chiudi</button></div>`, (m) => loadCredentials(m.querySelector('details')));
+}
+
+// ---------------------------------------------------------------------------
 // Account & users
 // ---------------------------------------------------------------------------
 const ROLE_LABEL = { admin: 'Amministratore', viewer: 'Sola lettura' };
@@ -787,6 +961,9 @@ async function route() {
       return await renderServer(m[1]);
     }
     if (h.startsWith('#/analysis')) return await renderAnalysis();
+    if (h.startsWith('#/portali')) return await renderPortals();
+    if (h.startsWith('#/app')) return await renderAllApps();
+    if (h.startsWith('#/archivio')) return await renderArchive();
     if (h.startsWith('#/account')) return renderAccount();
     if (h.startsWith('#/users')) return await renderUsers();
     return await renderOverview();

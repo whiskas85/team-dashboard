@@ -78,6 +78,39 @@ test('portal creation contract', async () => {
   assert.equal(apps.find((a) => a.name === 'gestionale').status, 'active');
   const demo = apps.find((a) => a.name === 'demo');
   assert.equal(demo.provisioned, 1);
-  assert.equal((await call('DELETE', `/api/apps/${demo.id}?deprovision=1`)).body.status, 'removing');
+  assert.equal((await call('DELETE', `/api/apps/${demo.id}?deprovision=1`)).status, 400, 'the name must be typed to confirm');
+  assert.equal((await call('DELETE', `/api/apps/${demo.id}?deprovision=1&confirm=demo`)).body.status, 'removing');
   assert.equal((await call('DELETE', `/api/apps/${prod.id}`)).body.status, 'deleted', 'monitoring can always be stopped');
+
+  // remove_app done -> the portal goes to the Archive (not deleted), with its archive folder
+  const auth = { authorization: `Bearer ${srv.token}` };
+  let tasks = (await call('POST', '/api/agent/report', { samples: [] }, auth)).body.tasks;
+  const removeTask = tasks.find((t) => t.action === 'remove_app');
+  assert.equal(removeTask.payload.name, 'demo');
+  await call('POST', `/api/agent/tasks/${removeTask.id}`, { status: 'done', message: '== backup fatto\n== cartella spostata in /opt/archivio/squadra-demo-20261006120000 (chiavi e accesso restano li\')' }, auth);
+  const running = (await call('GET', '/api/apps?view=all')).body.map((a) => a.name);
+  assert.ok(!running.includes('demo'), 'archived portals leave the running lists');
+  assert.ok(!(await call('GET', `/api/servers/${srv.id}`)).body.apps.some((a) => a.name === 'demo'));
+  const archive = (await call('GET', '/api/apps?view=archive')).body;
+  assert.equal(archive.length, 1);
+  assert.deepEqual([archive[0].name, archive[0].status, archive[0].archive_path, archive[0].archived_by, archive[0].server_name],
+    ['demo', 'archived', '/opt/archivio/squadra-demo-20261006120000', 'admin', 'zerodarkserver']);
+  assert.match((await create({ name: 'demo' })).body.error, /archivio/, 'name stays taken while archived');
+  assert.ok(!(await call('POST', '/api/agent/report', { samples: [] }, auth)).body.apps.some((a) => a.name === 'demo'), 'no longer monitored');
+
+  // purge: only from the archive, name confirmed, then purge_app; on success it is gone
+  const portals = (await call('GET', '/api/apps?view=portals')).body;
+  assert.equal((await call('POST', `/api/apps/${portals[0].id}/purge`, { confirm: portals[0].name })).status, 400, 'only archived apps');
+  assert.equal((await call('POST', `/api/apps/${archive[0].id}/purge`, { confirm: 'nope' })).status, 400);
+  assert.equal((await call('POST', `/api/apps/${archive[0].id}/purge`, { confirm: 'demo' })).body.status, 'purging');
+  tasks = (await call('POST', '/api/agent/report', { samples: [] }, auth)).body.tasks;
+  const purgeTask = tasks.find((t) => t.action === 'purge_app');
+  assert.deepEqual([purgeTask.payload.name, purgeTask.payload.archive_path], ['demo', '/opt/archivio/squadra-demo-20261006120000']);
+  await call('POST', `/api/agent/tasks/${purgeTask.id}`, { status: 'failed', message: 'Hook non installato' }, auth);
+  assert.equal((await call('GET', '/api/apps?view=archive')).body[0].status, 'archived', 'a failed purge leaves it in the archive');
+  await call('POST', `/api/apps/${archive[0].id}/purge`, { confirm: 'demo' });
+  const retry = (await call('POST', '/api/agent/report', { samples: [] }, auth)).body.tasks.find((t) => t.action === 'purge_app');
+  await call('POST', `/api/agent/tasks/${retry.id}`, { status: 'done', message: 'volumi e cartella eliminati' }, auth);
+  assert.equal((await call('GET', '/api/apps?view=archive')).body.length, 0);
+  assert.equal((await create({ name: 'demo', email: 'a@b.it' })).status, 200, 'name free again');
 });

@@ -96,6 +96,9 @@ const MIGRATIONS = [
   ['apps', 'health_at', 'INTEGER'],
   ['apps', 'health_error', 'TEXT'],   // short human-readable reason when down
   ['apps', 'provisioned', 'INTEGER NOT NULL DEFAULT 0'], // 1 = created on the server by the console
+  ['apps', 'archived_at', 'INTEGER'],  // set when remove_app moved the portal to the archive
+  ['apps', 'archived_by', 'TEXT'],
+  ['apps', 'archive_path', 'TEXT'],    // e.g. /opt/archivio/squadra-demo-20261006120000
 ];
 
 function open(file) {
