@@ -125,4 +125,18 @@ test('portal creation contract', async () => {
   await call('POST', `/api/agent/tasks/${retry.id}`, { status: 'done', message: 'volumi e cartella eliminati' }, auth);
   assert.equal((await call('GET', '/api/apps?view=archive')).body.length, 0);
   assert.equal((await create({ name: 'demo', email: 'a@b.it' })).status, 200, 'name free again');
+
+  // A squad registered by hand as a plain service, then edited into a portal, becomes archivable;
+  // production-like portals (zd-app, reserved names) never do.
+  await call('POST', `/api/servers/${srv.id}/apps`, { type: 'service', name: 'verdi', kind: 'docker', match: '^zd-sq-verdi-', provision: false });
+  await call('POST', `/api/servers/${srv.id}/apps`, { type: 'service', name: 'test9', kind: 'docker', match: '^zd-sq-test9-', provision: false });
+  let list = (await call('GET', `/api/servers/${srv.id}`)).body.apps;
+  const verdi = list.find((a) => a.name === 'verdi');
+  const test9 = list.find((a) => a.name === 'test9');
+  assert.equal(verdi.provisioned, 0);
+  await call('PATCH', `/api/apps/${verdi.id}`, { type: 'portal', domain: 'verdi.zerodarkteam.it' });
+  await call('PATCH', `/api/apps/${test9.id}`, { type: 'portal', domain: 'test9.zerodarkteam.it' });
+  list = (await call('GET', `/api/servers/${srv.id}`)).body.apps;
+  assert.equal(list.find((a) => a.name === 'verdi').provisioned, 1, 'zd-sq squad can be archived');
+  assert.equal(list.find((a) => a.name === 'test9').provisioned, 0, 'reserved names never');
 });

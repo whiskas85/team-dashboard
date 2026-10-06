@@ -6,7 +6,7 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { open, purge, tx } = require('./db');
+const { open, purge, tx, markSquadPortals } = require('./db');
 const { analyze } = require('./analytics');
 const { Users, ROLES, sessionCookie, sessionUser, publicUser } = require('./auth');
 const { probe } = require('./health');
@@ -732,6 +732,7 @@ route('PATCH', '/api/apps/:id', async (req, p) => {
   }
   const changedDomain = domain !== app.domain;
   db.prepare('UPDATE apps SET type = ?, domain = ?, match = ? WHERE id = ?').run(type, domain, match, app.id);
+  markSquadPortals(db);
   if (changedDomain || type !== app.type) db.prepare('UPDATE apps SET health = NULL, health_code = NULL, health_error = NULL, health_at = NULL WHERE id = ?').run(app.id);
   invalidateAnalysis();
   checkAppHealth(app.id).catch(() => {});
