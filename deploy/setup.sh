@@ -125,6 +125,9 @@ case "$owner" in
     ;;
   *)
     proxy_mode; health
+    if grep -q '^PROXY_NETWORK=.' .env; then
+      say "Console collegata al proxy esistente ($owner): nessuna modifica alla sua configurazione"
+    else
     cat <<MSG
 
 Le porte 80/443 sono gestite da "$owner": non modifico la sua configurazione.
@@ -139,11 +142,13 @@ La console è attiva su http://127.0.0.1:$CONSOLE_PORT. Per pubblicarla:
         }
   - altri proxy: inoltra $DOMAIN a http://127.0.0.1:$CONSOLE_PORT con l'header X-Forwarded-Proto.
 MSG
+    fi
     ;;
 esac
 
 say "Fatto"
-echo "URL:            https://$DOMAIN"
-echo "Password:       $(grep '^ADMIN_PASSWORD=' .env | cut -d= -f2)"
+echo "URL:             https://$DOMAIN"
+echo "Primo accesso:   utente admin, password $(grep '^ADMIN_PASSWORD=' .env | cut -d= -f2)"
+echo "                 (vale solo finché non la cambi da 'Il mio account')"
 echo "Token export AI: $(grep '^EXPORT_TOKEN=' .env | cut -d= -f2)"
-echo "(sono salvati in $(pwd)/.env)"
+echo "Password dimenticata: docker exec -it zerodark-console-console-1 node server/cli.js reset-password <utente>"

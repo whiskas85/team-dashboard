@@ -74,12 +74,15 @@ function shell(active, content) {
       <nav class="nav">
         <a href="#/" class="${active === 'servers' ? 'active' : ''}">Server</a>
         <a href="#/analysis" class="${active === 'analysis' ? 'active' : ''}">Capacità & combinazioni</a>
+        ${isAdmin() ? `<a href="#/users" class="${active === 'users' ? 'active' : ''}">Utenti</a>` : ''}
       </nav>
       <div class="spacer"></div>
+      <a class="user-chip ${active === 'account' ? 'active' : ''}" href="#/account" title="Il mio account"><span class="avatar" aria-hidden="true">${esc((state.me.user?.username || '?')[0].toUpperCase())}</span><span class="uname">${esc(state.me.user?.username || '')}</span></a>
       <button class="small" id="theme" title="Tema chiaro/scuro" aria-label="Cambia tema">◐</button>
       <button class="small" id="logout">Esci</button>
     </header>
     <main id="main">${content}</main>`;
+  document.body.classList.toggle('role-viewer', !isAdmin());
   document.getElementById('logout').onclick = async () => {
     await api('/api/logout', { method: 'POST' }).catch(() => {});
     state.me = { authenticated: false };
@@ -95,6 +98,8 @@ function shell(active, content) {
   return document.getElementById('main');
 }
 
+const isAdmin = () => state.me?.user?.role === 'admin';
+
 function setRefresh(fn, ms = 60000) {
   clearInterval(state.timer);
   state.timer = fn ? setInterval(() => document.visibilityState === 'visible' && fn(), ms) : null;
@@ -109,6 +114,7 @@ function renderLogin() {
     <div class="login"><form class="card" id="login">
       <div class="brand" style="margin-bottom:18px"><span class="logo">Z</span><span>ZeroDark Console</span></div>
       <h1>Accedi</h1><p class="muted" style="margin:4px 0 18px">Monitoraggio server e capacità</p>
+      <div class="field"><label for="un">Nome utente</label><input id="un" autocomplete="username" required value="admin"></div>
       <div class="field"><label for="pw">Password</label><input id="pw" type="password" autocomplete="current-password" required></div>
       <button class="primary" style="width:100%;justify-content:center">Entra</button>
       <div class="err" id="err"></div>
@@ -117,7 +123,7 @@ function renderLogin() {
   document.getElementById('login').onsubmit = async (e) => {
     e.preventDefault();
     try {
-      await api('/api/login', { method: 'POST', body: { password: document.getElementById('pw').value } });
+      await api('/api/login', { method: 'POST', body: { username: document.getElementById('un').value.trim(), password: document.getElementById('pw').value } });
       state.me = await api('/api/me');
       route();
     } catch (err) {
@@ -146,12 +152,12 @@ async function renderOverview() {
     main.innerHTML = `
       <div class="page-head">
         <div><h1>Server</h1><p>${servers.length} server monitorati · aggiornamento automatico ogni minuto</p></div>
-        <button class="primary" id="add">+ Aggiungi server</button>
+        <button class="primary admin-only" id="add">+ Aggiungi server</button>
       </div>
       ${v ? `<div class="banner"><div class="icon" aria-hidden="true">${v[0]}</div><div><b>${v[1]}</b> <span class="muted">(ultimi 7 giorni)</span>
         <p>${analysis.fleet.advice.map(esc).join(' ')} <a href="#/analysis">Vedi analisi →</a></p></div></div>` : ''}
       ${servers.length ? `<div class="grid cards">${servers.map((s) => serverCard(s, statusOf[s.id])).join('')}</div>`
-        : `<div class="card empty-state"><h2>Nessun server</h2><p>Aggiungi il primo server e installa l'agent con un solo comando.</p><button class="primary" id="add2">+ Aggiungi server</button></div>`}`;
+        : `<div class="card empty-state"><h2>Nessun server</h2><p>Aggiungi il primo server e installa l'agent con un solo comando.</p><button class="primary admin-only" id="add2">+ Aggiungi server</button></div>`}`;
     main.querySelectorAll('[data-server]').forEach((c) => {
       c.onclick = () => (location.hash = `#/server/${c.dataset.server}`);
       c.onkeydown = (e) => e.key === 'Enter' && c.click();
@@ -233,9 +239,9 @@ async function renderServer(id) {
           ${s.notes ? `<p class="muted">${esc(s.notes)}</p>` : ''}
         </div>
         <div class="row">
-          <button class="primary" id="newapp">+ Nuova app (portale)</button>
-          <button id="token">Installa agent</button>
-          <button class="danger" id="del">Elimina</button>
+          <button class="primary admin-only" id="newapp">+ Nuova app (portale)</button>
+          <button class="admin-only" id="token">Installa agent</button>
+          <button class="danger admin-only" id="del">Elimina</button>
         </div>
       </div>
 
@@ -335,7 +341,7 @@ function appsTable(apps) {
       <td class="r">${a.last24h.cpu_avg == null ? '–' : fmt.cores(a.last24h.cpu_avg / 100)}</td>
       <td class="r">${fmt.mb(a.last24h.mem_max)}</td>
       <td>${a.domain ? esc(a.domain) : '<span class="muted">–</span>'}${a.port ? `<span class="muted">:${a.port}</span>` : ''}</td>
-      <td class="r"><button class="small danger" data-del-app="${a.id}" aria-label="Rimuovi ${esc(a.name)}">Rimuovi</button></td>
+      <td class="r"><button class="small danger admin-only" data-del-app="${a.id}" aria-label="Rimuovi ${esc(a.name)}">Rimuovi</button></td>
     </tr>`).join('')}</tbody></table></div>
     <p class="muted" style="font-size:12px;margin:10px 0 0">CPU in core (1,00 = un core pieno). Clicca su un'app per vederne l'andamento.</p>`;
 }
@@ -495,6 +501,139 @@ function combo(c, title, best) {
 }
 
 // ---------------------------------------------------------------------------
+// Account & users
+// ---------------------------------------------------------------------------
+const ROLE_LABEL = { admin: 'Amministratore', viewer: 'Sola lettura' };
+
+function renderAccount() {
+  setRefresh(null);
+  const me = state.me.user;
+  const main = shell('account', `
+    <div class="page-head"><div><h1>Il mio account</h1><p>${esc(ROLE_LABEL[me.role] || me.role)}${me.last_login ? ` · ultimo accesso ${esc(fmt.dateTime(me.last_login))}` : ''}</p></div></div>
+    <div class="grid two">
+      <form class="card" id="f-name">
+        <h2 style="margin-bottom:14px">Nome utente</h2>
+        <div class="field"><label for="a-un">Nuovo nome utente</label><input id="a-un" autocomplete="username" required value="${esc(me.username)}"></div>
+        <div class="field"><label for="a-cur1">Password attuale</label><input id="a-cur1" type="password" autocomplete="current-password" required></div>
+        <div class="row"><button class="primary">Salva nome utente</button><span class="status-msg" id="m-name" role="status"></span></div>
+      </form>
+      <form class="card" id="f-pw">
+        <h2 style="margin-bottom:14px">Password</h2>
+        <div class="field"><label for="a-cur2">Password attuale</label><input id="a-cur2" type="password" autocomplete="current-password" required></div>
+        <div class="field"><label for="a-new">Nuova password</label><input id="a-new" type="password" autocomplete="new-password" minlength="8" required><small>Almeno 8 caratteri. Gli altri dispositivi collegati verranno disconnessi.</small></div>
+        <div class="field"><label for="a-new2">Ripeti la nuova password</label><input id="a-new2" type="password" autocomplete="new-password" minlength="8" required></div>
+        <div class="row"><button class="primary">Cambia password</button><span class="status-msg" id="m-pw" role="status"></span></div>
+      </form>
+    </div>`);
+  const msg = (id, text, ok) => { const el = main.querySelector(id); el.textContent = text; el.className = `status-msg ${ok ? 'ok' : 'bad'}`; };
+  main.querySelector('#f-name').onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      const r = await api('/api/me', { method: 'PATCH', body: { username: main.querySelector('#a-un').value.trim(), current_password: main.querySelector('#a-cur1').value } });
+      state.me.user = r.user;
+      renderAccount();
+      msg('#m-name', 'Nome utente aggiornato', true);
+    } catch (err) { msg('#m-name', err.message); }
+  };
+  main.querySelector('#f-pw').onsubmit = async (e) => {
+    e.preventDefault();
+    const n1 = main.querySelector('#a-new').value;
+    if (n1 !== main.querySelector('#a-new2').value) return msg('#m-pw', 'Le due password non coincidono');
+    try {
+      await api('/api/me', { method: 'PATCH', body: { new_password: n1, current_password: main.querySelector('#a-cur2').value } });
+      e.target.reset();
+      msg('#m-pw', 'Password cambiata', true);
+    } catch (err) { msg('#m-pw', err.message); }
+  };
+}
+
+async function renderUsers() {
+  setRefresh(null);
+  const main = shell('users', '<div class="loading">Caricamento…</div>');
+  if (!isAdmin()) { main.innerHTML = '<div class="card empty-state"><h2>Accesso riservato</h2><p>Solo gli amministratori possono gestire gli utenti.</p></div>'; return; }
+  const load = async () => {
+    const { users, roles } = await api('/api/users');
+    const me = state.me.user;
+    const roleSelect = (u) => `<select data-role="${u.id}" aria-label="Ruolo di ${esc(u.username)}">${roles.map((r) => `<option value="${r}" ${r === u.role ? 'selected' : ''}>${esc(ROLE_LABEL[r] || r)}</option>`).join('')}</select>`;
+    main.innerHTML = `
+      <div class="page-head"><div><h1>Utenti</h1><p>Gli amministratori gestiscono server, app e utenti. Gli utenti in sola lettura vedono dashboard e analisi.</p></div>
+        <button class="primary" id="newuser">+ Nuovo utente</button></div>
+      <div class="card table-wrap"><table>
+        <thead><tr><th>Utente</th><th>Ruolo</th><th>Ultimo accesso</th><th>Creato</th><th></th></tr></thead>
+        <tbody>${users.map((u) => `<tr>
+          <td><b>${esc(u.username)}</b>${u.id === me.id ? ' <span class="muted">(tu)</span>' : ''}</td>
+          <td style="max-width:200px">${roleSelect(u)}</td>
+          <td class="muted">${u.last_login ? esc(fmt.dateTime(u.last_login)) : 'mai'}</td>
+          <td class="muted">${esc(fmt.dateTime(u.created_at))}</td>
+          <td class="r"><div class="row" style="justify-content:flex-end">
+            <button class="small" data-reset="${u.id}" data-name="${esc(u.username)}">Reimposta password</button>
+            ${u.id === me.id ? '' : `<button class="small danger" data-deluser="${u.id}" data-name="${esc(u.username)}">Elimina</button>`}
+          </div></td></tr>`).join('')}</tbody></table></div>
+      <div class="err" id="u-err" role="status"></div>`;
+    const err = (t) => (main.querySelector('#u-err').textContent = t || '');
+    main.querySelector('#newuser').onclick = () => userModal(roles, load);
+    main.querySelectorAll('[data-role]').forEach((sel) => (sel.onchange = async () => {
+      try { await api(`/api/users/${sel.dataset.role}`, { method: 'PATCH', body: { role: sel.value } }); err(); state.me = await api('/api/me'); route(); }
+      catch (e) { err(e.message); load(); }
+    }));
+    main.querySelectorAll('[data-reset]').forEach((b) => (b.onclick = () => resetModal(b.dataset.reset, b.dataset.name)));
+    main.querySelectorAll('[data-deluser]').forEach((b) => (b.onclick = async () => {
+      if (!confirm(`Eliminare l'utente "${b.dataset.name}"?`)) return;
+      try { await api(`/api/users/${b.dataset.deluser}`, { method: 'DELETE' }); load(); } catch (e) { err(e.message); }
+    }));
+  };
+  await load();
+}
+
+function userModal(roles, onDone) {
+  modal(`
+    <h2>Nuovo utente</h2>
+    <form id="f">
+      <div class="field"><label for="nu">Nome utente</label><input id="nu" required autocomplete="off" placeholder="es. mario.rossi"></div>
+      <div class="field"><label for="np">Password iniziale</label><input id="np" type="text" minlength="8" required autocomplete="off"><small>Almeno 8 caratteri. Comunicala all'utente: potrà cambiarla da "Il mio account".</small></div>
+      <div class="field"><label for="nr">Ruolo</label><select id="nr">${roles.map((r) => `<option value="${r}" ${r === 'viewer' ? 'selected' : ''}>${esc(ROLE_LABEL[r] || r)}</option>`).join('')}</select></div>
+      <div class="err" id="e"></div>
+      <div class="modal-actions"><button type="button" data-close>Annulla</button><button class="primary">Crea utente</button></div>
+    </form>`, (m, close) => {
+    m.querySelector('#np').value = randomPassword();
+    m.querySelector('#f').onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        await api('/api/users', { method: 'POST', body: { username: m.querySelector('#nu').value.trim(), password: m.querySelector('#np').value, role: m.querySelector('#nr').value } });
+        close(); onDone();
+      } catch (err) { m.querySelector('#e').textContent = err.message; }
+    };
+  });
+}
+
+function resetModal(id, name) {
+  modal(`
+    <h2>Nuova password per ${esc(name)}</h2>
+    <form id="f">
+      <div class="field"><label for="rp">Nuova password</label><input id="rp" type="text" minlength="8" required autocomplete="off"><small>L'utente verrà disconnesso da tutti i dispositivi.</small></div>
+      <div class="err" id="e"></div>
+      <div class="modal-actions"><button type="button" data-close>Annulla</button><button class="primary">Imposta password</button></div>
+    </form>`, (m, close) => {
+    m.querySelector('#rp').value = randomPassword();
+    m.querySelector('#f').onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        await api(`/api/users/${id}`, { method: 'PATCH', body: { password: m.querySelector('#rp').value } });
+        if (Number(id) === state.me.user.id) state.me = await api('/api/me');
+        close();
+      } catch (err) { m.querySelector('#e').textContent = err.message; }
+    };
+  });
+}
+
+function randomPassword() {
+  const chars = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const a = new Uint32Array(14);
+  crypto.getRandomValues(a);
+  return Array.from(a, (n) => chars[n % chars.length]).join('');
+}
+
+// ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 async function route() {
@@ -508,6 +647,8 @@ async function route() {
       return await renderServer(m[1]);
     }
     if (h.startsWith('#/analysis')) return await renderAnalysis();
+    if (h.startsWith('#/account')) return renderAccount();
+    if (h.startsWith('#/users')) return await renderUsers();
     return await renderOverview();
   } catch (e) {
     if (e.message !== 'Sessione scaduta') {

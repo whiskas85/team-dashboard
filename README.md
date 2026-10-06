@@ -61,7 +61,7 @@ Senza Docker: `ADMIN_PASSWORD=... PUBLIC_URL=https://console.zerodarkteam.it npm
 
 | Variabile | Default | |
 |---|---|---|
-| `ADMIN_PASSWORD` | generata e stampata nei log al primo avvio | password della dashboard |
+| `ADMIN_PASSWORD` | generata e stampata nei log al primo avvio | password iniziale dell'utente `admin`, usata solo al primo avvio |
 | `EXPORT_TOKEN` | — | token Bearer per il tool AI (`/api/v1/export`) |
 | `RETENTION_DAYS` | `30` | finestra rolling dei dati |
 | `AGENT_INTERVAL` | `60` | secondi tra un invio e l'altro (comunicato agli agent) |
@@ -70,6 +70,22 @@ Senza Docker: `ADMIN_PASSWORD=... PUBLIC_URL=https://console.zerodarkteam.it npm
 | `PUBLIC_URL` | dall'header Host | URL usato nei comandi di installazione |
 | `DB_FILE` | `data/console.db` | percorso del database SQLite |
 | `TZ` | — | fuso orario per i profili orari (es. `Europe/Rome`) |
+
+## Utenti
+
+Al primo avvio viene creato l'utente **admin** con la password `ADMIN_PASSWORD`. Da lì in poi gli utenti vivono nel database:
+
+- **Il mio account** (clic sul proprio nome in alto): cambio di nome utente e password, sempre con conferma della password attuale.
+- **Utenti** (solo amministratori): crea utenti, cambia ruolo, reimposta password, elimina.
+- Ruoli: **Amministratore** (gestisce server, app e utenti) e **Sola lettura** (vede dashboard e analisi).
+- Un cambio di password disconnette le altre sessioni di quell'utente. Deve sempre restare almeno un amministratore.
+
+Password dimenticata, dal server:
+
+```bash
+docker exec -it zerodark-console-console-1 node server/cli.js reset-password <utente>   # stampa una password nuova
+docker exec -it zerodark-console-console-1 node server/cli.js list-users
+```
 
 ## Agent
 

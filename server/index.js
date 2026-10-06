@@ -8,6 +8,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { open, purge, tx } = require('./db');
 const { analyze } = require('./analytics');
+const { Users, ROLES, sessionCookie, sessionUser, publicUser } = require('./auth');
 
 const VERSION = '0.1.0';
 const cfg = {
@@ -39,12 +40,15 @@ function setting(key, init) {
   return v;
 }
 const SESSION_SECRET = setting('session_secret', () => crypto.randomBytes(32).toString('hex'));
-if (!cfg.adminPassword) {
-  cfg.adminPassword = setting('admin_password', () => {
-    const p = crypto.randomBytes(12).toString('base64url');
-    console.log(`[console] ADMIN_PASSWORD non impostata: generata password iniziale -> ${p}`);
-    return p;
-  });
+const users = new Users(db);
+if (!users.count()) {
+  let pw = cfg.adminPassword;
+  if (!pw) {
+    pw = crypto.randomBytes(12).toString('base64url');
+    console.log(`[console] ADMIN_PASSWORD non impostata: password iniziale dell'utente "admin" -> ${pw}`);
+  }
+  users.bootstrap(pw);
+  console.log('[console] creato l\'utente "admin" (cambia la password da Account dopo il primo accesso)');
 }
 
 const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
@@ -123,18 +127,26 @@ function baseUrl(req) {
 // Auth
 // ---------------------------------------------------------------------------
 const SESSION_TTL = 7 * 86400;
-function signSession(exp) {
-  return `${exp}.${crypto.createHmac('sha256', SESSION_SECRET).update(String(exp)).digest('hex')}`;
+function currentUser(req) {
+  if (req._user === undefined) req._user = sessionUser(SESSION_SECRET, users, cookies(req).zdt_session);
+  return req._user;
 }
-function isAdmin(req) {
-  const c = cookies(req).zdt_session;
-  if (!c) return false;
-  const [exp] = c.split('.');
-  return Number(exp) > now() && safeEq(c, signSession(exp));
+// Any signed-in user can read; only the "admin" role can change things.
+function requireUser(req) {
+  const u = currentUser(req);
+  if (!u) throw new HttpError(401, 'Non autenticato');
+  return u;
 }
 function requireAdmin(req) {
-  if (!isAdmin(req)) throw new HttpError(401, 'Non autenticato');
+  const u = requireUser(req);
+  if (u.role !== 'admin') throw new HttpError(403, 'Operazione riservata agli amministratori');
+  return u;
 }
+function setSession(req, res, user) {
+  const secure = cfg.cookieSecure && (req.headers['x-forwarded-proto'] === 'https' || cfg.publicUrl.startsWith('https'));
+  res.setHeader('Set-Cookie', `zdt_session=${sessionCookie(SESSION_SECRET, user, SESSION_TTL)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${SESSION_TTL}${secure ? '; Secure' : ''}`);
+}
+const authError = (e) => (e.status ? new HttpError(e.status, e.message) : e);
 function requireAgent(req) {
   const token = bearer(req);
   if (!token) throw new HttpError(401, 'Token agent mancante');
@@ -143,9 +155,15 @@ function requireAgent(req) {
   return server;
 }
 
+// Behind the reverse proxy every request comes from the proxy: use the client address it appended.
+function clientIp(req) {
+  const xff = String(req.headers['x-forwarded-for'] || '').split(',').map((x) => x.trim()).filter(Boolean);
+  return xff.length ? xff[xff.length - 1] : req.socket.remoteAddress;
+}
 const loginAttempts = new Map();
 function throttleLogin(ip) {
   const t = now();
+  if (loginAttempts.size > 10000) loginAttempts.clear();
   const rec = loginAttempts.get(ip) || { n: 0, t };
   if (t - rec.t > 900) {
     rec.n = 0;
@@ -391,23 +409,85 @@ const route = (method, pattern, handler) => {
 route('GET', '/healthz', () => ({ ok: true, version: VERSION }));
 
 route('POST', '/api/login', async (req, p, q, res) => {
-  throttleLogin(req.socket.remoteAddress);
+  const ip = clientIp(req);
+  throttleLogin(ip);
   const body = await readBody(req);
-  if (!safeEq(sha256(String(body.password || '')), sha256(cfg.adminPassword))) throw new HttpError(401, 'Password errata');
-  const exp = now() + SESSION_TTL;
-  const secure = cfg.cookieSecure && (req.headers['x-forwarded-proto'] === 'https' || cfg.publicUrl.startsWith('https'));
-  res.setHeader('Set-Cookie', `zdt_session=${signSession(exp)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${SESSION_TTL}${secure ? '; Secure' : ''}`);
-  return { ok: true };
+  const user = users.authenticate(str(body.username, 63) || 'admin', String(body.password || ''));
+  if (!user) throw new HttpError(401, 'Nome utente o password errati');
+  loginAttempts.delete(ip);
+  setSession(req, res, user);
+  return { ok: true, user: publicUser(user) };
 });
 route('POST', '/api/logout', (req, p, q, res) => {
   res.setHeader('Set-Cookie', 'zdt_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0');
   return { ok: true };
 });
-route('GET', '/api/me', (req) => ({ authenticated: isAdmin(req), version: VERSION, retention_days: cfg.retentionDays, headroom: cfg.headroom }));
+route('GET', '/api/me', (req) => {
+  const u = currentUser(req);
+  return { authenticated: !!u, user: publicUser(u), version: VERSION, retention_days: cfg.retentionDays, headroom: cfg.headroom };
+});
+// Own account: change username and/or password. Always requires the current password.
+route('PATCH', '/api/me', async (req, p, q, res) => {
+  const me = requireUser(req);
+  const body = await readBody(req);
+  const fresh = users.authenticate(me.username, String(body.current_password || ''));
+  if (!fresh) throw new HttpError(400, 'La password attuale non è corretta');
+  const patch = {};
+  if (body.username !== undefined && body.username !== me.username) patch.username = String(body.username).trim();
+  if (body.new_password) patch.password = String(body.new_password);
+  let updated;
+  try {
+    updated = users.update(me.id, patch);
+  } catch (e) {
+    throw authError(e);
+  }
+  setSession(req, res, updated); // keep this browser signed in, other sessions are logged out
+  return { ok: true, user: publicUser(updated) };
+});
+
+// User management (admins)
+route('GET', '/api/users', (req) => {
+  requireAdmin(req);
+  return { roles: ROLES, users: users.list() };
+});
+route('POST', '/api/users', async (req) => {
+  requireAdmin(req);
+  const body = await readBody(req);
+  try {
+    return publicUser(users.create(String(body.username || '').trim(), String(body.password || ''), oneOf(body.role, ROLES, 'viewer')));
+  } catch (e) {
+    throw authError(e);
+  }
+});
+route('PATCH', '/api/users/:id', async (req, p, q, res) => {
+  const me = requireAdmin(req);
+  const body = await readBody(req);
+  const patch = {};
+  if (body.username !== undefined) patch.username = String(body.username).trim();
+  if (body.role !== undefined) patch.role = String(body.role);
+  if (body.password) patch.password = String(body.password);
+  try {
+    const u = users.update(Number(p.id), patch);
+    if (u.id === me.id) setSession(req, res, u);
+    return publicUser(u);
+  } catch (e) {
+    throw authError(e);
+  }
+});
+route('DELETE', '/api/users/:id', (req, p) => {
+  const me = requireAdmin(req);
+  if (Number(p.id) === me.id) throw new HttpError(400, 'Non puoi eliminare il tuo stesso utente');
+  try {
+    users.remove(Number(p.id));
+  } catch (e) {
+    throw authError(e);
+  }
+  return { ok: true };
+});
 
 // Servers
 route('GET', '/api/servers', (req) => {
-  requireAdmin(req);
+  requireUser(req);
   return db.prepare('SELECT * FROM servers ORDER BY name').all().map(serverSummary);
 });
 route('POST', '/api/servers', async (req) => {
@@ -428,7 +508,7 @@ route('POST', '/api/servers', async (req) => {
   };
 });
 route('GET', '/api/servers/:id', (req, p) => {
-  requireAdmin(req);
+  requireUser(req);
   const s = db.prepare('SELECT * FROM servers WHERE id = ?').get(p.id);
   if (!s) throw new HttpError(404, 'Server non trovato');
   const tasks = db.prepare('SELECT t.*, a.name app_name FROM tasks t LEFT JOIN apps a ON a.id = t.app_id WHERE t.server_id = ? ORDER BY t.id DESC LIMIT 20').all(s.id);
@@ -458,7 +538,7 @@ route('POST', '/api/servers/:id/token', (req, p) => {
   return { token, install: `curl -fsSL ${base}/install.sh | sudo ZDT_URL=${base} ZDT_TOKEN=${token} bash` };
 });
 route('GET', '/api/servers/:id/metrics', (req, p, q) => {
-  requireAdmin(req);
+  requireUser(req);
   const r = rangeParams(q);
   return {
     ...r,
@@ -519,19 +599,19 @@ route('DELETE', '/api/apps/:id', (req, p, q) => {
   return { status: 'deleted' };
 });
 route('GET', '/api/apps/:id/metrics', (req, p, q) => {
-  requireAdmin(req);
+  requireUser(req);
   const r = rangeParams(q);
   return { ...r, rows: seriesQuery('app_metrics', 'app_id', p.id, ['cpu_pct', 'mem_mb'], r) };
 });
 
 // Analysis & export for the external AI tool
 route('GET', '/api/analysis', (req, p, q) => {
-  requireAdmin(req);
+  requireUser(req);
   return runAnalysis(q);
 });
 route('GET', '/api/v1/export', (req, p, q) => {
   const tok = bearer(req);
-  if (!(isAdmin(req) || (cfg.exportToken && tok && safeEq(sha256(tok), sha256(cfg.exportToken))))) throw new HttpError(401, 'Non autorizzato');
+  if (!(currentUser(req) || (cfg.exportToken && tok && safeEq(sha256(tok), sha256(cfg.exportToken))))) throw new HttpError(401, 'Non autorizzato');
   const result = runAnalysis(q);
   return {
     schema: 'zerodark.console.capacity/v1',

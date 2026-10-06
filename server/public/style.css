@@ -220,3 +220,18 @@ pre.copy { background: var(--page); border: 1px solid var(--border); border-radi
   main { padding: 16px; }
   .two { grid-template-columns: 1fr; }
 }
+
+/* Account */
+.user-chip { display: inline-flex; align-items: center; gap: 8px; padding: 4px 10px 4px 4px; border-radius: 999px; color: var(--ink-2); font-size: 13px; }
+.user-chip:hover, .user-chip.active { background: var(--surface-2); color: var(--ink); text-decoration: none; }
+.user-chip .avatar { width: 24px; height: 24px; border-radius: 50%; background: var(--accent); color: var(--accent-ink); display: grid; place-items: center; font-size: 12px; font-weight: 600; }
+.status-msg { font-size: 13px; }
+.status-msg.ok { color: var(--good-ink); }
+.status-msg.bad { color: var(--crit-ink); }
+body.role-viewer .admin-only { display: none !important; }
+@media (max-width: 720px) { .user-chip .uname { display: none; } }
+@media (max-width: 720px) {
+  .topbar { flex-wrap: wrap; height: auto; padding-block: 8px; row-gap: 6px; }
+  .topbar .nav { order: 10; width: 100%; overflow-x: auto; }
+  .topbar .nav a { white-space: nowrap; }
+}
