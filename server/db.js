@@ -112,7 +112,19 @@ function open(file) {
   }
   // Apps the console provisioned before the flag existed
   db.exec("UPDATE apps SET provisioned = 1 WHERE provisioned = 0 AND id IN (SELECT app_id FROM tasks WHERE action = 'create_app')");
+  markSquadPortals(db);
   return db;
+}
+
+// Gestionale squads (deploy/squadra-server.sh) are the only portals the console may archive:
+// containers zd-sq-<name>-*, and never the reserved names (production ops, test*, www).
+// Covers squads registered by hand instead of created from the console.
+function markSquadPortals(db) {
+  db.exec(`UPDATE apps SET provisioned = 1
+           WHERE provisioned = 0 AND type = 'portal' AND kind = 'docker'
+             AND match = '^zd-sq-' || name || '-'
+             AND name NOT IN ('ops', 'www') AND name NOT LIKE 'test%'
+             AND name GLOB '[a-z0-9]*' AND name NOT GLOB '*[^a-z0-9-]*'`);
 }
 
 // Rolling window: everything older than `days` is dropped, so the DB never grows past the window.
@@ -136,4 +148,4 @@ function tx(db, fn) {
   }
 }
 
-module.exports = { open, purge, tx };
+module.exports = { open, purge, tx, markSquadPortals };
