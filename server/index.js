@@ -264,7 +264,10 @@ function decorateApps(apps) {
     const last = db.prepare('SELECT ts, cpu_pct, mem_mb, procs FROM app_metrics WHERE app_id = ? ORDER BY ts DESC LIMIT 1').get(a.id);
     const day = db.prepare('SELECT AVG(cpu_pct) cpu_avg, MAX(cpu_pct) cpu_max, AVG(mem_mb) mem_avg, MAX(mem_mb) mem_max FROM app_metrics WHERE app_id = ? AND ts >= ?').get(a.id, since);
     const cred = credentials.status(a.id);
-    return { ...a, latest: last || null, last24h: day, credentials: cred && { status: cred.status, username: cred.username, revealed_at: cred.revealed_at, revealed_by: cred.revealed_by } };
+    const credError = cred && cred.status === 'failed'
+      ? db.prepare("SELECT message FROM tasks WHERE app_id = ? AND action = 'set_admin_password' ORDER BY id DESC LIMIT 1").get(a.id)?.message
+      : undefined;
+    return { ...a, latest: last || null, last24h: day, credentials: cred && { status: cred.status, username: cred.username, revealed_at: cred.revealed_at, revealed_by: cred.revealed_by, error: credError } };
   });
 }
 
@@ -406,7 +409,7 @@ function agentConfig(server) {
     tasks: tasks.map((t) => {
       const payload = JSON.parse(t.payload);
       // Added at delivery time only: the stored payload never contains the password.
-      if (t.action === 'create_app' && t.app_id) {
+      if ((t.action === 'create_app' || t.action === 'set_admin_password') && t.app_id) {
         const pw = credentials.forProvisioning(t.app_id);
         if (pw) payload.admin_password = pw;
       }
@@ -431,6 +434,9 @@ function ackTask(server, id, body) {
       // create_app confirms with {"admin_password": "applied"} on its last line; otherwise the
       // gestionale picked its own password and the console must not show one.
       if (ok && credentials.status(task.app_id)) credentials.setStatus(task.app_id, patch.admin_password === 'applied' ? 'applied' : 'unsupported');
+    } else if (task.action === 'set_admin_password') {
+      // Same confirmation as create_app: without "applied" the old password may still be the valid one.
+      if (credentials.status(task.app_id)) credentials.setStatus(task.app_id, ok && (body.app || {}).admin_password === 'applied' ? 'applied' : 'failed');
     } else if (task.action === 'remove_app') {
       // The portal is now in /opt/archivio (data volumes kept): it moves to the console's Archive.
       if (ok) {
@@ -746,6 +752,25 @@ route('GET', '/api/apps/:id/credentials', (req, p) => {
   const c = credentials.reveal(app.id, me.username, now());
   if (!c) throw new HttpError(404, 'Nessuna credenziale iniziale per questa app');
   return { ...c, login_url: app.domain ? `https://${app.domain}/login` : null };
+});
+// New first-access password for a portal created by the gestionale scripts (e.g. when create_app
+// picked its own, or the owner lost it): the set_admin_password hook applies it and confirms.
+route('POST', '/api/apps/:id/credentials/reset', (req, p) => {
+  requireAdmin(req);
+  const app = db.prepare('SELECT * FROM apps WHERE id = ?').get(p.id);
+  if (!app) throw new HttpError(404, 'App non trovata');
+  if (app.type !== 'portal' || !app.provisioned) throw new HttpError(400, 'Solo per i portali delle squadre (creati dagli script del gestionale)');
+  if (app.status !== 'active') throw new HttpError(400, 'Il portale deve essere attivo');
+  const busy = db.prepare("SELECT 1 FROM tasks WHERE app_id = ? AND action = 'set_admin_password' AND status IN ('queued', 'sent')").get(app.id);
+  if (busy) throw new HttpError(409, 'Una nuova password è già in preparazione');
+  const t = now();
+  tx(db, () => {
+    credentials.renew(app.id, t);
+    db.prepare("INSERT INTO tasks (server_id, app_id, action, payload, status, created_at, updated_at) VALUES (?, ?, 'set_admin_password', ?, 'queued', ?, ?)").run(
+      app.server_id, app.id, JSON.stringify({ name: app.name, type: app.type, kind: app.kind, match: app.match, domain: app.domain, email: credentials.status(app.id).username || undefined }), t, t
+    );
+  });
+  return { status: 'resetting' };
 });
 // "Verifica ora": any signed-in user may re-run the reachability check of a portal.
 route('POST', '/api/apps/:id/health', async (req, p) => {

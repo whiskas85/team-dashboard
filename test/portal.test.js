@@ -139,4 +139,23 @@ test('portal creation contract', async () => {
   list = (await call('GET', `/api/servers/${srv.id}`)).body.apps;
   assert.equal(list.find((a) => a.name === 'verdi').provisioned, 1, 'zd-sq squad can be archived');
   assert.equal(list.find((a) => a.name === 'test9').provisioned, 0, 'reserved names never');
+
+  // New first-access password for a squad portal whose password the console does not know
+  assert.equal((await call('POST', `/api/apps/${test9.id}/credentials/reset`)).status, 400, 'only squad portals');
+  assert.equal((await call('POST', `/api/apps/${verdi.id}/credentials/reset`)).body.status, 'resetting');
+  assert.equal((await call('POST', `/api/apps/${verdi.id}/credentials/reset`)).status, 409, 'one at a time');
+  const nextReset = async () => (await call('POST', '/api/agent/report', { samples: [] }, auth)).body.tasks.find((t) => t.action === 'set_admin_password');
+  let reset = await nextReset();
+  assert.equal(reset.payload.name, 'verdi');
+  assert.match(reset.payload.admin_password, /^[A-Za-z2-9]{16}$/);
+  assert.ok(!db.prepare('SELECT payload FROM tasks WHERE id = ?').get(reset.id).payload.includes(reset.payload.admin_password), 'never stored in the task');
+  await call('POST', `/api/agent/tasks/${reset.id}`, { status: 'failed', message: 'Hook non installato' }, auth);
+  let v = (await call('GET', `/api/servers/${srv.id}`)).body.apps.find((a) => a.name === 'verdi');
+  assert.deepEqual([v.credentials.status, v.credentials.error], ['failed', 'Hook non installato']);
+  assert.equal((await call('GET', `/api/apps/${verdi.id}/credentials`)).body.password, undefined, 'not shown unless applied');
+  await call('POST', `/api/apps/${verdi.id}/credentials/reset`);
+  reset = await nextReset();
+  await call('POST', `/api/agent/tasks/${reset.id}`, { status: 'done', message: 'password aggiornata', app: { admin_password: 'applied' } }, auth);
+  const shown = (await call('GET', `/api/apps/${verdi.id}/credentials`)).body;
+  assert.deepEqual([shown.status, shown.password, shown.login_url], ['applied', reset.payload.admin_password, 'https://verdi.zerodarkteam.it/login']);
 });

@@ -114,9 +114,22 @@ function versionBadge() {
     : `<span class="version-badge" title="${esc(title)}">${inner}</span>`;
 }
 
-function setRefresh(fn, ms = 60000) {
+// Auto-refresh every `ms`; while `fast()` is true (an app is being archived, deleted or created by
+// the agent) refresh every few seconds, so the change shows up without reloading the page.
+const BUSY = ['pending', 'provisioning', 'removing', 'purging'];
+const anyBusy = (apps) => apps.some((a) => BUSY.includes(a.status) || a.credentials?.status === 'resetting');
+function setRefresh(fn, ms = 60000, fast = null) {
   clearInterval(state.timer);
-  state.timer = fn ? setInterval(() => document.visibilityState === 'visible' && fn(), ms) : null;
+  if (!fn) { state.timer = null; return; }
+  let last = Date.now();
+  let running = false;
+  state.timer = setInterval(async () => {
+    if (running || document.visibilityState !== 'visible') return;
+    if (Date.now() - last < ms && !(fast && fast())) return;
+    running = true;
+    last = Date.now();
+    try { await fn(); } catch { /* next tick retries */ } finally { running = false; }
+  }, 3000);
 }
 
 // ---------------------------------------------------------------------------
@@ -251,8 +264,10 @@ function installModal(r, title) {
 // ---------------------------------------------------------------------------
 async function renderServer(id) {
   const main = shell('servers', '<div class="loading">Caricamento…</div>');
+  let busy = false;
   const load = async () => {
     const [s, metrics, analysis] = await Promise.all([api(`/api/servers/${id}`), api(`/api/servers/${id}/metrics?range=${state.range}`), api('/api/analysis?days=7&n=1').catch(() => null)]);
+    busy = anyBusy(s.apps);
     const report = analysis?.servers.find((x) => x.id === s.id);
     const m = s.latest || {};
     const extra = m.extra || {};
@@ -349,13 +364,14 @@ async function renderServer(id) {
       load();
     }));
     main.querySelectorAll('details[data-cred]').forEach((d) => d.addEventListener('toggle', () => d.open && loadCredentials(d)));
+    wireCredentialReset(main, load);
     main.querySelectorAll('[data-edit-app]').forEach((b) => (b.onclick = () => editAppModal(s.apps.find((a) => a.id === Number(b.dataset.editApp)), load)));
     main.querySelectorAll('[data-del-app]').forEach((b) => (b.onclick = () => removeAppModal(s.apps.find((a) => a.id === Number(b.dataset.delApp)), load)));
     const sel = s.apps.find((a) => a.id === state.selectedApp);
     if (sel) { main.querySelector(`[data-app="${sel.id}"]`)?.classList.add('selected'); showApp(sel); }
   };
   await load();
-  setRefresh(load);
+  setRefresh(load, 60000, () => busy);
 }
 
 const rangeSeg = () => `<div class="seg" role="group" aria-label="Periodo">${['1h', '6h', '24h', '7d', '30d'].map((r) => `<button data-range="${r}" class="${state.range === r ? 'on' : ''}">${r.replace('d', 'g')}</button>`).join('')}</div>`;
@@ -395,16 +411,42 @@ function healthBadge(a) {
 }
 
 // First-access credentials of portals created by the console: collapsed, admins only, fetched on open.
-function credentialsRow(a) {
-  if (!a.credentials || !isAdmin()) return '';
-  const c = a.credentials;
+const isSquad = (a) => a.type === 'portal' && a.provisioned && a.status === 'active';
+const hasAccess = (a) => isAdmin() && !!(a.credentials || isSquad(a));
+
+function credentialsBody(a) {
+  const squad = isSquad(a);
+  const c = a.credentials || { status: 'none' };
+  const renew = (label) => squad ? `<div class="row" style="margin-top:8px"><button type="button" class="small primary" data-cred-reset="${a.id}">${label}</button></div>` : '';
   let body;
   if (c.status === 'pending') body = '<p class="muted">Il portale è in creazione: la password sarà disponibile quando lo script avrà finito.</p>';
-  else if (c.status === 'unsupported') body = `<p class="muted">Lo script del gestionale ha scelto una sua password e non quella della console. La trovi sul server in <code>/opt/squadra-${esc(a.name)}/ACCESSO.txt</code>.</p>`;
-  else body = '<div class="cred-body" data-cred-body><p class="muted">Caricamento…</p></div>';
+  else if (c.status === 'resetting') body = '<p class="muted">Nuova password in preparazione: il server la imposta entro un paio di minuti. Questa pagina si aggiorna da sola.</p>';
+  else if (c.status === 'none') body = `<p class="muted">La console non conosce la password di questo portale.</p>${renew('Genera una nuova password')}`;
+  else if (c.status === 'unsupported') body = `<p class="muted">Lo script del gestionale ha scelto una sua password, quindi la console non la conosce. Generane una nuova: la imposta il server e la trovi qui, pronta da consegnare.</p>${renew('Genera una nuova password')}`;
+  else if (c.status === 'failed') body = `<p class="err">Il server non ha potuto impostare la nuova password${c.error ? `: ${esc(c.error)}` : ''}.</p><p class="muted">Resta valida la password precedente. Serve l'hook <code>set_admin_password</code> del gestionale sul server.</p>${renew('Riprova')}`;
+  else body = `<div class="cred-body" data-cred-body><p class="muted">Caricamento…</p></div>${renew('Genera una nuova password')}`;
+  return body;
+}
+
+function credentialsRow(a) {
+  if (!hasAccess(a)) return '';
+  const c = a.credentials || { status: 'none' };
+  const body = credentialsBody(a);
   const seen = c.revealed_at ? ` · vista da ${esc(c.revealed_by || '?')} ${ago(c.revealed_at)}` : '';
-  return `<tr class="cred-row"><td colspan="9"><details data-cred="${a.id}" data-cred-status="${esc(c.status)}">
+  return `<tr class="cred-row"><td colspan="9"><details data-cred="${a.id}" data-cred-status="${esc(c.status)}"${c.status === 'resetting' ? ' open' : ''}>
     <summary>🔑 Accesso iniziale<span class="muted" style="font-weight:400">${seen}</span></summary>${body}</details></td></tr>`;
+}
+
+// Asks the server to set a fresh first-access password chosen by the console.
+function wireCredentialReset(main, reload) {
+  main.querySelectorAll('[data-cred-reset]').forEach((b) => (b.onclick = async (e) => {
+    e.stopPropagation();
+    if (!confirm('Generare una nuova password per l\'amministratore del portale? Quella attuale smetterà di funzionare appena il server avrà applicato la nuova.')) return;
+    b.disabled = true;
+    b.textContent = 'Invio…';
+    try { await api(`/api/apps/${b.dataset.credReset}/credentials/reset`, { method: 'POST' }); } catch (err) { alert(err.message); }
+    reload();
+  }));
 }
 
 async function loadCredentials(details) {
@@ -660,7 +702,7 @@ function wireAppActions(main, apps, reload) {
   main.querySelectorAll('[data-edit-app]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); editAppModal(byId(b.dataset.editApp), reload); }));
   main.querySelectorAll('[data-del-app]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); removeAppModal(byId(b.dataset.delApp), reload); }));
   main.querySelectorAll('[data-purge]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); purgeAppModal(byId(b.dataset.purge), reload); }));
-  main.querySelectorAll('[data-cred-open]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); credentialsModal(byId(b.dataset.credOpen)); }));
+  main.querySelectorAll('[data-cred-open]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); credentialsModal(byId(b.dataset.credOpen), reload); }));
   main.querySelectorAll('[data-health]').forEach((b) => (b.onclick = async (e) => {
     e.stopPropagation();
     b.disabled = true;
@@ -675,14 +717,16 @@ function wireAppActions(main, apps, reload) {
 }
 
 const appActions = (a) => `<div class="row actions">
-  ${a.credentials && a.credentials.status === 'applied' ? `<button class="small admin-only" data-cred-open="${a.id}">🔑 Accesso</button>` : ''}
+  ${hasAccess(a) ? `<button class="small admin-only" data-cred-open="${a.id}">🔑 Accesso</button>` : ''}
   <button class="small admin-only" data-edit-app="${a.id}">Modifica</button>
   <button class="small danger admin-only" data-del-app="${a.id}">Rimuovi</button></div>`;
 
 async function renderPortals() {
   const main = shell('servers', '<div class="loading">Caricamento…</div>');
+  let busy = false;
   const load = async () => {
     const apps = await api('/api/apps?view=portals');
+    busy = anyBusy(apps);
     main.innerHTML = `${homeTabs('portals')}
       <div class="page-head"><div><h1>Portali</h1><p>${apps.length} portali attivi · per crearne uno: apri un server → <b>+ Nuova app</b></p></div></div>
       ${!apps.length ? '<div class="card empty-state"><p>Nessun portale. Apri un server e usa <b>+ Nuova app → Portale</b>.</p></div>' : `
@@ -703,13 +747,15 @@ async function renderPortals() {
     wireAppActions(main, apps, load);
   };
   await load();
-  setRefresh(load);
+  setRefresh(load, 60000, () => busy);
 }
 
 async function renderAllApps() {
   const main = shell('servers', '<div class="loading">Caricamento…</div>');
+  let busy = false;
   const load = async () => {
     const apps = await api('/api/apps?view=all');
+    busy = anyBusy(apps);
     main.innerHTML = `${homeTabs('apps')}
       <div class="page-head"><div><h1>App ospitate</h1><p>${apps.length} app su tutti i server · clicca per aprire il server</p></div></div>
       ${!apps.length ? '<div class="card empty-state"><p>Nessuna app monitorata.</p></div>' : `
@@ -732,13 +778,15 @@ async function renderAllApps() {
     wireAppActions(main, apps, load);
   };
   await load();
-  setRefresh(load);
+  setRefresh(load, 60000, () => busy);
 }
 
 async function renderArchive() {
   const main = shell('servers', '<div class="loading">Caricamento…</div>');
+  let busy = false;
   const load = async () => {
     const apps = await api('/api/apps?view=archive');
+    busy = anyBusy(apps);
     const when = (a) => (a.archived_at ? `${esc(fmt.dateTime(a.archived_at))}${a.archived_by ? ` · ${esc(a.archived_by)}` : ''}` : '–');
     const note = (a) => (a.status === 'archived' && a.status_msg && /errore|fallit|non /i.test(a.status_msg) ? `<div class="err" style="font-size:12px">${esc(a.status_msg.slice(-200))}</div>` : '');
     const purge = (a) => {
@@ -770,7 +818,7 @@ async function renderArchive() {
     }));
   };
   await load();
-  setRefresh(load);
+  setRefresh(load, 60000, () => busy);
 }
 
 // ---------------------------------------------------------------------------
@@ -830,11 +878,14 @@ function purgeAppModal(app, onDone) {
   });
 }
 
-function credentialsModal(app) {
+function credentialsModal(app, reload) {
   if (!app) return;
   modal(`<h2>Accesso iniziale · ${esc(app.name)}</h2>
-    <details data-cred="${app.id}" open style="border:0;padding:0"><summary hidden></summary><div class="cred-body" data-cred-body><p class="muted">Caricamento…</p></div></details>
-    <div class="modal-actions"><button type="button" data-close>Chiudi</button></div>`, (m) => loadCredentials(m.querySelector('details')));
+    <details data-cred="${app.id}" open style="border:0;padding:0"><summary hidden></summary>${credentialsBody(app)}</details>
+    <div class="modal-actions"><button type="button" data-close>Chiudi</button></div>`, (m, close) => {
+    loadCredentials(m.querySelector('details'));
+    wireCredentialReset(m, () => { close(); reload && reload(); });
+  });
 }
 
 // ---------------------------------------------------------------------------

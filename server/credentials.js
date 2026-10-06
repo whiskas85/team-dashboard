@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS app_credentials (
   ciphertext  TEXT NOT NULL,
   iv          TEXT NOT NULL,
   tag         TEXT NOT NULL,
-  status      TEXT NOT NULL DEFAULT 'pending',   -- pending | applied | unsupported
+  status      TEXT NOT NULL DEFAULT 'pending',   -- pending | resetting | applied | unsupported | failed
   created_at  INTEGER NOT NULL,
   revealed_at INTEGER,
   revealed_by TEXT
@@ -65,16 +65,22 @@ class Credentials {
   }
 
   /** New random initial password for an app; returns nothing (the plaintext only leaves via take/reveal). */
-  create(appId, username, now) {
+  create(appId, username, now, status = 'pending') {
     const enc = this.encrypt(generatePassword());
     this.db
       .prepare('INSERT OR REPLACE INTO app_credentials (app_id, username, ciphertext, iv, tag, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .run(appId, username || null, enc.ciphertext, enc.iv, enc.tag, 'pending', now);
+      .run(appId, username || null, enc.ciphertext, enc.iv, enc.tag, status, now);
   }
 
-  /** Plaintext for the create_app delivery, only while the portal has not been created yet. */
+  /** A fresh password for an existing portal, to be applied by the set_admin_password hook. */
+  renew(appId, now) {
+    const old = this.status(appId);
+    this.create(appId, old && old.username, now, 'resetting');
+  }
+
+  /** Plaintext for the create_app / set_admin_password delivery, only until the hook confirmed it. */
   forProvisioning(appId) {
-    const row = this.db.prepare("SELECT * FROM app_credentials WHERE app_id = ? AND status = 'pending'").get(appId);
+    const row = this.db.prepare("SELECT * FROM app_credentials WHERE app_id = ? AND status IN ('pending', 'resetting')").get(appId);
     return row ? this.decrypt(row) : null;
   }
 
