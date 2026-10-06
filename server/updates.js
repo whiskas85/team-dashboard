@@ -34,7 +34,7 @@ function serverVersions(server) {
 }
 
 class Updates {
-  constructor(db, { now, tx, interval = 6 * 3600, hour = 4, timeZone = 'Europe/Rome' }) {
+  constructor(db, { now, tx, interval = 3600, hour = 4, timeZone = 'Europe/Rome' }) {
     Object.assign(this, { db, now, tx, interval, hour, timeZone });
   }
 
@@ -143,6 +143,14 @@ class Updates {
 
   setVersion(appId, version) {
     this.db.prepare('UPDATE apps SET version = ?, version_at = ? WHERE id = ?').run(version, this.now(), appId);
+    // A portal running something newer than the server's "latest" (typically production just
+    // released): the list is stale, ask again now instead of waiting for the next round.
+    const app = this.db.prepare('SELECT server_id FROM apps WHERE id = ?').get(appId);
+    const s = app && this.db.prepare('SELECT * FROM servers WHERE id = ?').get(app.server_id);
+    if (!s) return;
+    const v = serverVersions(s);
+    const stale = !v.latest || cmpVersion(version, v.latest) > 0;
+    if (stale && (!s.versions_at || s.versions_at < this.now() - 600)) this.refresh(s.id, { force: true });
   }
 
   /** For the UI: running update, last result and newest version available on the server. */
@@ -156,6 +164,7 @@ class Updates {
     const lastResult = last && last.result ? JSON.parse(last.result) : null;
     return {
       latest: v.latest,
+      checked_at: v.at,
       behind: !!(v.latest && app.version && cmpVersion(app.version, v.latest) < 0),
       auto: !!app.auto_update,
       running: pending ? { version: JSON.parse(pending.payload).version, status: pending.status } : null,

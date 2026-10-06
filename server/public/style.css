@@ -261,7 +261,7 @@ tr.cred-row details[open] summary { margin-bottom: 10px; }
 .portal-card { display: grid; gap: 10px; cursor: pointer; }
 .portal-card h2 { font-size: 16px; }
 .portal-card .meta { display: flex; justify-content: space-between; gap: 8px; font-size: 12.5px; color: var(--muted); flex-wrap: wrap; }
-.row.actions { gap: 6px; justify-content: flex-end; flex-wrap: nowrap; }
+.row.actions { gap: 6px; justify-content: flex-end; flex-wrap: wrap; min-width: 170px; }
 .portal-card .row.actions { justify-content: flex-start; flex-wrap: wrap; }
 .st-archived .dot { background: var(--muted); }
 .st-purging .dot { background: var(--critical); }
@@ -277,3 +277,5 @@ button.danger-btn:disabled { opacity: 0.45; }
 .banner .card-advice { margin-top: 6px; }
 .st-unmonitored .dot { background: var(--muted); }
 .actions button { white-space: nowrap; }
+.badge-btn { background: none; border: 0; padding: 0; cursor: pointer; font: inherit; }
+.badge-btn:hover .badge { filter: brightness(1.1); text-decoration: underline; }

@@ -108,4 +108,13 @@ test('updates of the gestionale squads', async () => {
   assert.deepEqual(u.autoUpdate(new Date('2026-10-06T02:35:00Z')), [], 'once');
   const auto = (await report()).find((t) => t.action === 'update_app');
   assert.deepEqual([auto.payload.name, auto.payload.version, auto.payload.auto], ['rossi', '3.26.0', true]);
+  assert.equal((await call('GET', '/api/apps?view=portals')).body.find((a) => a.name === 'rossi').update.checked_at > 0, true);
+
+  // Production released 3.27.0 (seen by the health check): the server's list is asked again by itself
+  await ack(auto, 'done', { version: '3.26.0', previous: '3.25.0' });
+  db.prepare('UPDATE servers SET versions_at = versions_at - 3600 WHERE id = ?').run(srv.id);
+  u.setVersion(prod.id, '3.27.0');
+  assert.ok((await report()).some((t) => t.action === 'list_versions' && !t.payload.name), 'stale list refreshed');
+  u.setVersion(prod.id, '3.27.0');
+  assert.equal((await report()).length, 0, 'once');
 });

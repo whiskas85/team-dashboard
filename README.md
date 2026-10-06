@@ -74,7 +74,7 @@ Senza Docker: `ADMIN_PASSWORD=... PUBLIC_URL=https://console.zerodarkteam.it npm
 | `HEALTH_INTERVAL` | `300` | secondi tra i controlli `https://<dominio>/login` dei portali (0 = spento) |
 | `UPDATE_HOUR` | `4` | ora locale degli aggiornamenti automatici dei gestionali |
 | `TIME_ZONE` | `Europe/Rome` | fuso orario di `UPDATE_HOUR` |
-| `VERSIONS_INTERVAL` | `21600` | secondi tra una richiesta `list_versions` e l'altra a ogni server |
+| `VERSIONS_INTERVAL` | `3600` | secondi tra una richiesta `list_versions` e l'altra a ogni server |
 | `RELEASES_URL` | `https://github.com/whiskas85/team-management/releases/tag/v` | link alle novità di una versione |
 | `TZ` | — | fuso orario per i profili orari (es. `Europe/Rome`) |
 
@@ -153,8 +153,9 @@ In console, sotto il portale, **Accesso iniziale** (a scomparsa, solo amministra
 Ogni squadra ha la sua versione del gestionale. Il lavoro rischioso lo fa il server (hook `update_app` → `squadra-server.sh aggiorna`: backup, cambio, controllo, ritorno automatico alla versione di prima se non risponde); la console decide **cosa e quando**.
 
 - **Versione in uso**: dal controllo del sito (`GET https://<dominio>/api/stato`, dal gestionale 3.25) oppure, per le squadre più vecchie, da `list_versions <nome>`.
-- **Versioni pronte sul server**: hook `list_versions`, chiesto ogni 6 ore (`VERSIONS_INTERVAL`) o con **Controlla versioni** nella scheda Portali.
+- **Versioni pronte sul server**: hook `list_versions`, chiesto da sola dalla console ogni ora (`VERSIONS_INTERVAL`), subito dopo ogni aggiornamento e appena un portale (di solito la produzione appena rilasciata) gira una versione più nuova di quelle note.
 - **Aggiorna** (riga del portale): scegli la versione (anche una precedente), con il link alle novità. **Aggiorna tutti** porta alla più recente ogni squadra indietro.
+- **Aggiornamento** (colonna nella scheda Portali): *Automatico* o *Manuale*, si cambia dalla finestra **Aggiorna**.
 - **Aggiornamento automatico** (per portale): ogni notte alle `UPDATE_HOUR` alla versione più recente. Una versione che è già tornata indietro non viene ritentata da sola.
 - Un aggiornamento alla volta per server. Storico per portale, con l'output dello script quando non riesce.
 

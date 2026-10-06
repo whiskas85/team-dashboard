@@ -43,7 +43,7 @@ const cfg = {
   // Gestionale updates: nightly automatic updates at UPDATE_HOUR (TIME_ZONE), versions asked every VERSIONS_INTERVAL s.
   updateHour: Number(process.env.UPDATE_HOUR ?? 4),
   timeZone: process.env.TIME_ZONE || 'Europe/Rome',
-  versionsInterval: Number(process.env.VERSIONS_INTERVAL || 6 * 3600),
+  versionsInterval: Number(process.env.VERSIONS_INTERVAL || 3600),
   releasesUrl: process.env.RELEASES_URL || 'https://github.com/whiskas85/team-management/releases/tag/v',
 };
 
