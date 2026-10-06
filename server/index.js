@@ -251,7 +251,8 @@ function serverSummary(s) {
 }
 
 // Archived apps (and those being purged) live in the Archive, not with the running ones.
-const ARCHIVED = "('archived', 'purging')";
+// 'unmonitored' = "Smetti di monitorare": kept in the Archive so an accidental click can be undone.
+const ARCHIVED = "('archived', 'purging', 'unmonitored')";
 
 function appRows(serverId) {
   return decorateApps(db.prepare(`SELECT * FROM apps WHERE server_id = ? AND status NOT IN ${ARCHIVED} ORDER BY name`).all(serverId));
@@ -353,7 +354,7 @@ function ingest(server, body) {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
     const insApp = db.prepare('INSERT INTO app_metrics (app_id, server_id, ts, cpu_pct, mem_mb, procs) VALUES (?, ?, ?, ?, ?, ?)');
-    const findApp = db.prepare('SELECT id FROM apps WHERE server_id = ? AND name = ?');
+    const findApp = db.prepare('SELECT id, status FROM apps WHERE server_id = ? AND name = ?');
     const newApp = db.prepare("INSERT INTO apps (server_id, name, type, kind, match, status, created_at) VALUES (?, ?, 'service', ?, ?, 'active', ?)");
     const touchApp = db.prepare('UPDATE apps SET last_seen = ? WHERE id = ?');
 
@@ -376,6 +377,7 @@ function ingest(server, body) {
           newApp.run(server.id, name, oneOf(a.kind, ['process', 'docker', 'systemd'], 'process'), str(a.match), t);
           row = findApp.get(server.id, name);
         }
+        if (['unmonitored', 'archived', 'purging'].includes(row.status)) continue; // not monitored on purpose
         insApp.run(row.id, server.id, ts, num(a.cpu_pct), num(a.mem_mb), num(a.procs));
         touchApp.run(ts, row.id);
       }
@@ -616,7 +618,10 @@ route('POST', '/api/servers/:id/apps', async (req, p) => {
   const port = num(body.port);
   if (port !== null && (port < 1 || port > 65535 || !Number.isInteger(port))) throw new HttpError(400, 'Porta non valida');
   const existing = db.prepare('SELECT status FROM apps WHERE server_id = ? AND name = ?').get(server.id, name);
-  if (existing) throw new HttpError(409, existing.status === 'archived' ? `"${name}" è nell'archivio: eliminalo definitivamente prima di riusare il nome` : 'App già presente su questo server');
+  if (existing) {
+    if (existing.status === 'unmonitored') throw new HttpError(409, `"${name}" è nell'Archivio tra le app non monitorate: ricollegala da lì`);
+    throw new HttpError(409, existing.status === 'archived' ? `"${name}" è nell'archivio: eliminalo definitivamente prima di riusare il nome` : 'App già presente su questo server');
+  }
   // Portals: containers zd-sq-<name>-{db,app,whatsapp}, monitored as one app from the start.
   const kind = type === 'portal' ? 'docker' : oneOf(body.kind, ['process', 'docker', 'systemd'], 'docker');
   const match = type === 'portal' ? `^zd-sq-${name}-` : str(body.match, 200) || name;
@@ -626,7 +631,9 @@ route('POST', '/api/servers/:id/apps', async (req, p) => {
   const id = tx(db, () => {
     const r = db
       .prepare('INSERT INTO apps (server_id, name, type, kind, match, domain, port, template, status, provisioned, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(server.id, name, type, kind, match, domain, port, template, provision ? 'pending' : 'active', provision ? 1 : 0, t);
+      // A portal registered without provisioning is still a gestionale squad (zd-sq-<name>-*, reserved names
+      // refused above): the console may archive it later through remove_app.
+      .run(server.id, name, type, kind, match, domain, port, template, provision ? 'pending' : 'active', provision || type === 'portal' ? 1 : 0, t);
     const appId = Number(r.lastInsertRowid);
     // Portals: the console picks the first-access password and hands it to create_app.
     if (provision && type === 'portal') credentials.create(appId, email, t);
@@ -657,9 +664,20 @@ route('DELETE', '/api/apps/:id', (req, p, q) => {
     });
     return { status: 'removing' };
   }
-  db.prepare('DELETE FROM apps WHERE id = ?').run(app.id);
+  // Stop monitoring: nothing happens on the server, and the app waits in the Archive ("Ricollega").
+  db.prepare("UPDATE apps SET status = 'unmonitored', archived_at = ?, archived_by = ? WHERE id = ?").run(now(), me.username, app.id);
   invalidateAnalysis();
-  return { status: 'deleted' };
+  return { status: 'unmonitored' };
+});
+route('POST', '/api/apps/:id/reattach', (req, p) => {
+  requireAdmin(req);
+  const app = db.prepare('SELECT * FROM apps WHERE id = ?').get(p.id);
+  if (!app) throw new HttpError(404, 'App non trovata');
+  if (app.status !== 'unmonitored') throw new HttpError(400, 'Si può ricollegare solo un\'app che non è più monitorata');
+  db.prepare("UPDATE apps SET status = 'active', archived_at = NULL, archived_by = NULL WHERE id = ?").run(app.id);
+  invalidateAnalysis();
+  checkAppHealth(app.id).catch(() => {});
+  return { status: 'active' };
 });
 // All apps across servers: running ones (view=all|portals) or the Archive (view=archive).
 route('GET', '/api/apps', (req, p, q) => {
@@ -676,10 +694,10 @@ route('POST', '/api/apps/:id/purge', async (req, p) => {
   requireAdmin(req);
   const app = db.prepare('SELECT * FROM apps WHERE id = ?').get(p.id);
   if (!app) throw new HttpError(404, 'App non trovata');
-  if (app.status !== 'archived') throw new HttpError(400, "Si può eliminare definitivamente solo un'app nell'archivio");
+  if (!['archived', 'unmonitored'].includes(app.status)) throw new HttpError(400, "Si può eliminare definitivamente solo un'app nell'archivio");
   const body = await readBody(req);
   if (body.confirm !== app.name) throw new HttpError(400, `Per confermare scrivi il nome esatto: ${app.name}`);
-  if (!app.provisioned) {
+  if (!app.provisioned || app.status === 'unmonitored') {
     // never created by the console: nothing to delete on the server, just forget it
     db.prepare('DELETE FROM apps WHERE id = ?').run(app.id);
     return { status: 'deleted' };

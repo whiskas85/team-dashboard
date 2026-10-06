@@ -78,9 +78,21 @@ test('portal creation contract', async () => {
   assert.equal(apps.find((a) => a.name === 'gestionale').status, 'active');
   const demo = apps.find((a) => a.name === 'demo');
   assert.equal(demo.provisioned, 1);
+  assert.equal((await call('DELETE', `/api/apps/${prod.id}`)).body.status, 'unmonitored', 'monitoring can always be stopped');
+  // ...and undone: it waits in the Archive, the agent's samples are not stored meanwhile
+  const auth0 = { authorization: `Bearer ${srv.token}` };
+  const before = db.prepare('SELECT COUNT(*) n FROM app_metrics WHERE app_id = ?').get(prod.id).n;
+  await call('POST', '/api/agent/report', { samples: [{ system: { cpu_pct: 1 }, apps: [{ name: 'gestionale', kind: 'docker', cpu_pct: 1, mem_mb: 100 }] }] }, auth0);
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM app_metrics WHERE app_id = ?').get(prod.id).n, before, 'not monitored, not recreated');
+  assert.ok((await call('GET', '/api/apps?view=archive')).body.some((a) => a.name === 'gestionale' && a.status === 'unmonitored'));
+  assert.match((await call('POST', `/api/servers/${srv.id}/apps`, { type: 'service', name: 'gestionale', provision: false })).body.error, /ricollegala/);
+  assert.equal((await call('POST', `/api/apps/${prod.id}/reattach`)).body.status, 'active');
+  const back = (await call('GET', `/api/servers/${srv.id}`)).body.apps.find((a) => a.name === 'gestionale');
+  assert.deepEqual([back.status, back.type, back.domain], ['active', 'portal', 'ops.zerodarkteam.it'], 'settings kept');
+  await call('DELETE', `/api/apps/${prod.id}`);
+  assert.equal((await call('POST', `/api/apps/${prod.id}/purge`, { confirm: 'gestionale' })).body.status, 'deleted', 'removed from the console only');
   assert.equal((await call('DELETE', `/api/apps/${demo.id}?deprovision=1`)).status, 400, 'the name must be typed to confirm');
   assert.equal((await call('DELETE', `/api/apps/${demo.id}?deprovision=1&confirm=demo`)).body.status, 'removing');
-  assert.equal((await call('DELETE', `/api/apps/${prod.id}`)).body.status, 'deleted', 'monitoring can always be stopped');
 
   // remove_app done -> the portal goes to the Archive (not deleted), with its archive folder
   const auth = { authorization: `Bearer ${srv.token}` };
