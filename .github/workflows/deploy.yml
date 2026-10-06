@@ -44,8 +44,14 @@ jobs:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '/opt/zerodark-console' }}
         run: |
           mkdir -p ~/.ssh
-          printf '%s\n' "$SSH_KEY" > ~/.ssh/id && chmod 600 ~/.ssh/id
+          # Keys pasted from a Windows terminal often carry CR characters or trailing spaces: strip them.
+          printf '%s\n' "$SSH_KEY" | tr -d '\r' | sed -e 's/[[:space:]]*$//' -e '/^$/d' > ~/.ssh/id && chmod 600 ~/.ssh/id
+          if ! ssh-keygen -y -f ~/.ssh/id > /dev/null; then
+            echo "::error::DEPLOY_SSH_KEY non è una chiave privata valida. Ricopiala intera (da -----BEGIN a -----END, righe comprese) da: cat /root/.ssh/github_deploy"
+            exit 1
+          fi
           ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          printf '{"commit":"%s","built_at":"%s","run":"%s","repo":"%s"}\n' "$GITHUB_SHA" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$GITHUB_RUN_NUMBER" "$GITHUB_REPOSITORY" > server/build.json
           SSH="ssh -i $HOME/.ssh/id -o BatchMode=yes"
           rsync -az --delete --exclude .git --exclude deploy/.env --exclude data/ -e "$SSH" ./ "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/"
           $SSH "$DEPLOY_USER@$DEPLOY_HOST" "cd $DEPLOY_PATH/deploy && bash setup.sh && docker image prune -f"

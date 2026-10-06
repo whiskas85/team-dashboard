@@ -71,6 +71,7 @@ function shell(active, content) {
   $app.innerHTML = `
     <header class="topbar">
       <a class="brand" href="#/"><span class="logo">Z</span><span>ZeroDark Console</span></a>
+      ${versionBadge()}
       <nav class="nav">
         <a href="#/" class="${active === 'servers' ? 'active' : ''}">Server</a>
         <a href="#/analysis" class="${active === 'analysis' ? 'active' : ''}">Capacità & combinazioni</a>
@@ -100,6 +101,19 @@ function shell(active, content) {
 
 const isAdmin = () => state.me?.user?.role === 'admin';
 
+// "v0.2.0 · 4aafec6": version + deployed commit, links to the commit on GitHub.
+function versionBadge() {
+  const b = state.me?.build || { version: state.me?.version };
+  if (!b.version) return '';
+  const sha = b.commit ? b.commit.slice(0, 7) : 'manuale';
+  const when = b.built_at ? new Date(b.built_at).toLocaleString('it-IT', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : null;
+  const title = [`Versione ${b.version}`, b.commit ? `commit ${b.commit}` : 'installazione manuale', when && `rilasciata il ${when}`, b.run && `deploy #${b.run}`].filter(Boolean).join(' · ');
+  const inner = `<span class="v">v${esc(b.version)}</span><span class="sha">${esc(sha)}</span>`;
+  return b.commit && b.repo
+    ? `<a class="version-badge" href="https://github.com/${esc(b.repo)}/commit/${esc(b.commit)}" target="_blank" rel="noopener" title="${esc(title)}">${inner}</a>`
+    : `<span class="version-badge" title="${esc(title)}">${inner}</span>`;
+}
+
 function setRefresh(fn, ms = 60000) {
   clearInterval(state.timer);
   state.timer = fn ? setInterval(() => document.visibilityState === 'visible' && fn(), ms) : null;
@@ -118,6 +132,7 @@ function renderLogin() {
       <div class="field"><label for="pw">Password</label><input id="pw" type="password" autocomplete="current-password" required></div>
       <button class="primary" style="width:100%;justify-content:center">Entra</button>
       <div class="err" id="err"></div>
+      <div style="margin-top:14px;display:flex;justify-content:center">${versionBadge()}</div>
     </form></div>`;
   document.getElementById('pw').focus();
   document.getElementById('login').onsubmit = async (e) => {

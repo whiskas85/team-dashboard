@@ -10,7 +10,16 @@ const { open, purge, tx } = require('./db');
 const { analyze } = require('./analytics');
 const { Users, ROLES, sessionCookie, sessionUser, publicUser } = require('./auth');
 
-const VERSION = '0.1.0';
+const VERSION = require('../package.json').version;
+// Written by the deploy workflow (commit, date, run); absent on manual installs.
+const BUILD = (() => {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(__dirname, 'build.json'), 'utf8'));
+  } catch {
+    return {};
+  }
+})();
+const buildInfo = { version: VERSION, commit: BUILD.commit || null, built_at: BUILD.built_at || null, run: BUILD.run || null, repo: BUILD.repo || null };
 const cfg = {
   port: Number(process.env.PORT || 8080),
   host: process.env.HOST || '0.0.0.0',
@@ -406,7 +415,7 @@ const route = (method, pattern, handler) => {
   routes.push({ method, re, keys, handler });
 };
 
-route('GET', '/healthz', () => ({ ok: true, version: VERSION }));
+route('GET', '/healthz', () => ({ ok: true, ...buildInfo }));
 
 route('POST', '/api/login', async (req, p, q, res) => {
   const ip = clientIp(req);
@@ -424,7 +433,7 @@ route('POST', '/api/logout', (req, p, q, res) => {
 });
 route('GET', '/api/me', (req) => {
   const u = currentUser(req);
-  return { authenticated: !!u, user: publicUser(u), version: VERSION, retention_days: cfg.retentionDays, headroom: cfg.headroom };
+  return { authenticated: !!u, user: publicUser(u), version: VERSION, build: buildInfo, retention_days: cfg.retentionDays, headroom: cfg.headroom };
 });
 // Own account: change username and/or password. Always requires the current password.
 route('PATCH', '/api/me', async (req, p, q, res) => {
@@ -698,7 +707,7 @@ function housekeeping() {
 if (require.main === module) {
   housekeeping();
   setInterval(housekeeping, 3600 * 1000).unref();
-  server.listen(cfg.port, cfg.host, () => console.log(`[console] v${VERSION} in ascolto su http://${cfg.host}:${cfg.port} (retention ${cfg.retentionDays} giorni)`));
+  server.listen(cfg.port, cfg.host, () => console.log(`[console] v${VERSION}${BUILD.commit ? ` (${BUILD.commit.slice(0, 7)})` : ''} in ascolto su http://${cfg.host}:${cfg.port} (retention ${cfg.retentionDays} giorni)`));
   const stop = () => server.close(() => process.exit(0));
   process.on('SIGTERM', stop);
   process.on('SIGINT', stop);
