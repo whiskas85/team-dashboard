@@ -332,8 +332,16 @@ async function renderServer(id) {
       try { await api(`/api/apps/${b.dataset.health}/health`, { method: 'POST' }); } catch (e) { alert(e.message); }
       load();
     }));
+    main.querySelectorAll('[data-edit-app]').forEach((b) => (b.onclick = () => editAppModal(s.apps.find((a) => a.id === Number(b.dataset.editApp)), load)));
     main.querySelectorAll('[data-del-app]').forEach((b) => (b.onclick = async () => {
       const app = s.apps.find((a) => a.id === Number(b.dataset.delApp));
+      if (!app.provisioned) {
+        if (confirm(`Smettere di monitorare "${app.name}"?\n\nIl server non viene toccato: l'app non è stata creata dalla console. Se è nella configurazione dell'agent, ricomparirà al prossimo invio.`)) {
+          await api(`/api/apps/${app.id}`, { method: 'DELETE' });
+          load();
+        }
+        return;
+      }
       const what = app.type === 'portal' ? 'Fa un backup finale, ferma i container, stacca il sito e archivia la cartella in /opt/archivio. I volumi restano.' : "Esegue lo script remove_app sul server.";
       const deprov = confirm(`Rimuovere "${app.name}" anche dal server?\n${what}\n\nOK = rimuovi dal server · Annulla = scegli se smettere solo di monitorarla`);
       if (!deprov && !confirm(`Smettere di monitorare "${app.name}" senza toccare il server?`)) return;
@@ -363,7 +371,7 @@ function appsTable(apps) {
       <td class="r">${a.last24h.cpu_avg == null ? '–' : fmt.cores(a.last24h.cpu_avg / 100)}</td>
       <td class="r">${fmt.mb(a.last24h.mem_max)}</td>
       <td>${a.domain ? (a.type === 'portal' ? `<a href="https://${esc(a.domain)}" target="_blank" rel="noopener">${esc(a.domain)}</a>` : esc(a.domain)) : '<span class="muted">–</span>'}${a.port ? `<span class="muted">:${a.port}</span>` : ''}${healthBadge(a)}</td>
-      <td class="r"><button class="small danger admin-only" data-del-app="${a.id}" aria-label="Rimuovi ${esc(a.name)}">Rimuovi</button></td>
+      <td class="r"><div class="row" style="justify-content:flex-end;flex-wrap:nowrap"><button class="small admin-only" data-edit-app="${a.id}" aria-label="Modifica ${esc(a.name)}">Modifica</button><button class="small danger admin-only" data-del-app="${a.id}" aria-label="Rimuovi ${esc(a.name)}">Rimuovi</button></div></td>
     </tr>`).join('')}</tbody></table></div>
     <p class="muted" style="font-size:12px;margin:10px 0 0">CPU in core (1,00 = un core pieno). Clicca su un'app per vederne l'andamento.</p>`;
 }
@@ -390,6 +398,28 @@ async function showApp(app) {
   box.innerHTML = `<div class="grid two" style="margin-top:16px">${chartCard('a-cpu', `${app.name} · CPU`, '')}${chartCard('a-mem', `${app.name} · RAM`, '')}</div>`;
   lineChart(document.getElementById('a-cpu'), { from: d.from, to: d.to, ts, series: [{ name: 'CPU', values: d.rows.map((r) => (r.cpu_pct == null ? null : r.cpu_pct / 100)), color: C.s1 }], format: fmt.cores });
   lineChart(document.getElementById('a-mem'), { from: d.from, to: d.to, ts, series: [{ name: 'RAM', values: d.rows.map((r) => r.mem_mb), color: C.s1 }], format: fmt.mb });
+}
+
+function editAppModal(app, onDone) {
+  modal(`
+    <h2>Modifica ${esc(app.name)}</h2>
+    <form id="f">
+      <div class="field"><label for="et">Tipo</label><select id="et">${[['portal', 'Portale (gestionale)'], ['service', 'Servizio'], ['other', 'Altro']].map(([v, l]) => `<option value="${v}" ${app.type === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+      <div class="field"><label for="ed">Dominio</label><input id="ed" autocomplete="off" value="${esc(app.domain || '')}" placeholder="es. ops.zerodarkteam.it"><small>Per un portale: la console controlla che <code>https://&lt;dominio&gt;/login</code> risponda.</small></div>
+      <div class="field"><label for="em2">Criterio di monitoraggio</label><input id="em2" autocomplete="off" value="${esc(app.match || '')}"><small>${app.kind === 'systemd' ? 'Unit systemd.' : `Espressione regolare sui nomi ${app.kind === 'docker' ? 'dei container' : 'dei processi'}.`} Se l'app è definita nella configurazione dell'agent, vale quella.</small></div>
+      <p class="muted" style="font-size:13px;margin:0">Cambia solo come la console mostra e controlla l'app: sul server non viene toccato nulla.</p>
+      <div class="err" id="e"></div>
+      <div class="modal-actions"><button type="button" data-close>Annulla</button><button class="primary">Salva</button></div>
+    </form>`, (m, close) => {
+    m.querySelector('#f').onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        await api(`/api/apps/${app.id}`, { method: 'PATCH', body: { type: m.querySelector('#et').value, domain: m.querySelector('#ed').value.trim() || null, match: m.querySelector('#em2').value.trim() || null } });
+        close();
+        onDone();
+      } catch (err) { m.querySelector('#e').textContent = err.message; }
+    };
+  });
 }
 
 function newAppModal(server, onDone) {

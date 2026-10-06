@@ -57,4 +57,27 @@ test('portal creation contract', async () => {
   const rossi = (await call('GET', `/api/servers/${srv.id}`)).body.apps.find((a) => a.name === 'rossi');
   assert.equal(rossi.domain, 'gestionale.rossi.it');
   assert.equal((await call('POST', `/api/servers/${srv.id}/apps`, { type: 'service', name: 'Ops_Api', kind: 'systemd', provision: false })).status, 200);
+
+  // Existing portals found by the agent (e.g. production) can be marked as portals with their domain...
+  await call('POST', '/api/agent/report', { samples: [{ system: { cpu_pct: 1 }, apps: [{ name: 'gestionale', kind: 'docker', match: '^zd-(app|db)$', cpu_pct: 1, mem_mb: 100 }] }] }, { authorization: `Bearer ${srv.token}` });
+  let apps = (await call('GET', `/api/servers/${srv.id}`)).body.apps;
+  const prod = apps.find((a) => a.name === 'gestionale');
+  assert.equal(prod.type, 'service');
+  assert.equal(prod.provisioned, 0);
+  assert.equal((await call('PATCH', `/api/apps/${prod.id}`, { type: 'portal', domain: null })).status, 400, 'a portal needs a domain');
+  assert.equal((await call('PATCH', `/api/apps/${prod.id}`, { match: '([' })).status, 400, 'invalid regex');
+  const edited = await call('PATCH', `/api/apps/${prod.id}`, { type: 'portal', domain: 'OPS.zerodarkteam.it' });
+  assert.equal(edited.status, 200);
+  assert.deepEqual([edited.body.type, edited.body.domain, edited.body.match], ['portal', 'ops.zerodarkteam.it', '^zd-(app|db)$']);
+
+  // ...but the console never runs remove_app on something it did not create
+  const del = await call('DELETE', `/api/apps/${prod.id}?deprovision=1`);
+  assert.equal(del.status, 400);
+  assert.match(del.body.error, /non è stata creata dalla console/);
+  apps = (await call('GET', `/api/servers/${srv.id}`)).body.apps;
+  assert.equal(apps.find((a) => a.name === 'gestionale').status, 'active');
+  const demo = apps.find((a) => a.name === 'demo');
+  assert.equal(demo.provisioned, 1);
+  assert.equal((await call('DELETE', `/api/apps/${demo.id}?deprovision=1`)).body.status, 'removing');
+  assert.equal((await call('DELETE', `/api/apps/${prod.id}`)).body.status, 'deleted', 'monitoring can always be stopped');
 });

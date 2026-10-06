@@ -598,8 +598,8 @@ route('POST', '/api/servers/:id/apps', async (req, p) => {
   const t = now();
   const id = tx(db, () => {
     const r = db
-      .prepare('INSERT INTO apps (server_id, name, type, kind, match, domain, port, template, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(server.id, name, type, kind, match, domain, port, template, provision ? 'pending' : 'active', t);
+      .prepare('INSERT INTO apps (server_id, name, type, kind, match, domain, port, template, status, provisioned, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(server.id, name, type, kind, match, domain, port, template, provision ? 'pending' : 'active', provision ? 1 : 0, t);
     const appId = Number(r.lastInsertRowid);
     if (provision) {
       db.prepare("INSERT INTO tasks (server_id, app_id, action, payload, status, created_at, updated_at) VALUES (?, ?, 'create_app', ?, 'queued', ?, ?)").run(
@@ -616,6 +616,8 @@ route('DELETE', '/api/apps/:id', (req, p, q) => {
   const app = db.prepare('SELECT * FROM apps WHERE id = ?').get(p.id);
   if (!app) throw new HttpError(404, 'App non trovata');
   if (q.get('deprovision') === '1') {
+    // Only what the console created: never run remove_app on production or on apps found by the agent.
+    if (!app.provisioned) throw new HttpError(400, `"${app.name}" non è stata creata dalla console: si può solo smettere di monitorarla`);
     const t = now();
     tx(db, () => {
       db.prepare("UPDATE apps SET status = 'removing' WHERE id = ?").run(app.id);
@@ -628,6 +630,32 @@ route('DELETE', '/api/apps/:id', (req, p, q) => {
   db.prepare('DELETE FROM apps WHERE id = ?').run(app.id);
   invalidateAnalysis();
   return { status: 'deleted' };
+});
+// Edit how an app is shown and checked: type, domain, monitoring rule. Nothing changes on the server.
+route('PATCH', '/api/apps/:id', async (req, p) => {
+  requireAdmin(req);
+  const app = db.prepare('SELECT * FROM apps WHERE id = ?').get(p.id);
+  if (!app) throw new HttpError(404, 'App non trovata');
+  const body = await readBody(req);
+  const type = body.type === undefined ? app.type : oneOf(body.type, ['portal', 'service', 'other'], app.type);
+  let domain = body.domain === undefined ? app.domain : str(body.domain, 253);
+  if (domain) domain = domain.toLowerCase();
+  if (domain && !DOMAIN_RE.test(domain)) throw new HttpError(400, 'Dominio non valido');
+  if (type === 'portal' && !domain) throw new HttpError(400, 'Un portale ha bisogno del suo dominio');
+  const match = body.match === undefined ? app.match : str(body.match, 200) || app.name;
+  if (app.kind !== 'systemd') {
+    try {
+      new RegExp(match);
+    } catch {
+      throw new HttpError(400, 'Criterio di monitoraggio non valido (espressione regolare)');
+    }
+  }
+  const changedDomain = domain !== app.domain;
+  db.prepare('UPDATE apps SET type = ?, domain = ?, match = ? WHERE id = ?').run(type, domain, match, app.id);
+  if (changedDomain || type !== app.type) db.prepare('UPDATE apps SET health = NULL, health_code = NULL, health_error = NULL, health_at = NULL WHERE id = ?').run(app.id);
+  invalidateAnalysis();
+  checkAppHealth(app.id).catch(() => {});
+  return db.prepare('SELECT id, name, type, domain, match FROM apps WHERE id = ?').get(app.id);
 });
 // "Verifica ora": any signed-in user may re-run the reachability check of a portal.
 route('POST', '/api/apps/:id/health', async (req, p) => {
