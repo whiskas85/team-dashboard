@@ -49,6 +49,11 @@ class Credentials {
     this.db = db;
     this.key = key;
     db.exec(SCHEMA);
+    const cols = db.prepare('PRAGMA table_info(app_credentials)').all().map((c) => c.name);
+    // delivered_at: the owner got in, the password is no longer shown (only a recovery makes a new one)
+    for (const [col, type] of [['delivered_at', 'INTEGER'], ['delivered_by', 'TEXT'], ['reason', "TEXT NOT NULL DEFAULT 'initial'"]]) {
+      if (!cols.includes(col)) db.exec(`ALTER TABLE app_credentials ADD COLUMN ${col} ${type}`);
+    }
   }
 
   encrypt(text) {
@@ -65,17 +70,22 @@ class Credentials {
   }
 
   /** New random initial password for an app; returns nothing (the plaintext only leaves via take/reveal). */
-  create(appId, username, now, status = 'pending') {
+  create(appId, username, now, status = 'pending', reason = 'initial') {
     const enc = this.encrypt(generatePassword());
     this.db
-      .prepare('INSERT OR REPLACE INTO app_credentials (app_id, username, ciphertext, iv, tag, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .run(appId, username || null, enc.ciphertext, enc.iv, enc.tag, status, now);
+      .prepare('INSERT OR REPLACE INTO app_credentials (app_id, username, ciphertext, iv, tag, status, created_at, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(appId, username || null, enc.ciphertext, enc.iv, enc.tag, status, now, reason);
+  }
+
+  /** The owner has logged in: stop showing the password. */
+  markDelivered(appId, who, now) {
+    return this.db.prepare("UPDATE app_credentials SET delivered_at = ?, delivered_by = ? WHERE app_id = ? AND status = 'applied'").run(now, who, appId).changes > 0;
   }
 
   /** A fresh password for an existing portal, to be applied by the set_admin_password hook. */
   renew(appId, now) {
     const old = this.status(appId);
-    this.create(appId, old && old.username, now, 'resetting');
+    this.create(appId, old && old.username, now, 'resetting', 'recovery');
   }
 
   /** Plaintext for the create_app / set_admin_password delivery, only until the hook confirmed it. */
@@ -89,7 +99,7 @@ class Credentials {
   }
 
   status(appId) {
-    const row = this.db.prepare('SELECT status, username, revealed_at, revealed_by FROM app_credentials WHERE app_id = ?').get(appId);
+    const row = this.db.prepare('SELECT status, username, revealed_at, revealed_by, delivered_at, delivered_by, reason, created_at FROM app_credentials WHERE app_id = ?').get(appId);
     return row || null;
   }
 
@@ -97,9 +107,10 @@ class Credentials {
   reveal(appId, who, now) {
     const row = this.db.prepare('SELECT * FROM app_credentials WHERE app_id = ?').get(appId);
     if (!row) return null;
-    if (row.status !== 'applied') return { status: row.status, username: row.username };
+    const info = { status: row.status, username: row.username, reason: row.reason, created_at: row.created_at, delivered_at: row.delivered_at, delivered_by: row.delivered_by };
+    if (row.status !== 'applied' || row.delivered_at) return info;
     this.db.prepare('UPDATE app_credentials SET revealed_at = ?, revealed_by = ? WHERE app_id = ?').run(now, who, appId);
-    return { status: row.status, username: row.username, password: this.decrypt(row) };
+    return { ...info, password: this.decrypt(row) };
   }
 }
 

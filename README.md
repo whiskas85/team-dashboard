@@ -139,7 +139,7 @@ ln -sf /opt/gestionale/deploy/console-hooks/purge_app /etc/zdt-agent/hooks/purge
 ln -sf /opt/gestionale/deploy/console-hooks/set_admin_password /etc/zdt-agent/hooks/set_admin_password
 ```
 
-Dalla console, **Nuova app → Portale**: nome (minuscole, numeri, trattini; `ops`, `test*` e `www` sono riservati, per una prova `demo`), dominio (vuoto = `<nome>.zerodarkteam.it`, configurabile con `PORTAL_DOMAIN`) ed email dell'admin (`ZDT_APP_EMAIL`). L'app viene monitorata da subito sui container `^zd-sq-<nome>-`. La password dell'admin resta sul server in `/opt/squadra-<nome>/ACCESSO.txt`. Ogni 5 minuti (`HEALTH_INTERVAL`) la console verifica che `https://<dominio>/login` risponda 200 e lo mostra nella tabella delle app.
+Dalla console, **Nuova app → Portale**: nome (minuscole, numeri, trattini; `ops`, `test*` e `www` sono riservati, per una prova `demo`), dominio (vuoto = `<nome>.zerodarkteam.it`, configurabile con `PORTAL_DOMAIN`) e il **proprietario**, cioè il primo amministratore: nome, cognome, data di nascita, telefono ed email (all'hook come `ZDT_APP_FIRST_NAME`, `ZDT_APP_LAST_NAME`, `ZDT_APP_BIRTH_DATE` in formato `AAAA-MM-GG`, `ZDT_APP_PHONE`, `ZDT_APP_EMAIL`, e nel JSON su stdin). Si possono correggere da **Modifica**. L'app viene monitorata da subito sui container `^zd-sq-<nome>-`. La password dell'admin resta sul server in `/opt/squadra-<nome>/ACCESSO.txt`. Ogni 5 minuti (`HEALTH_INTERVAL`) la console verifica che `https://<dominio>/login` risponda 200 e lo mostra nella tabella delle app.
 
 #### Password del primo accesso
 
@@ -147,9 +147,9 @@ Per i portali creati dalla console, la password iniziale dell'admin la **sceglie
 
 Contratto per `create_app`: usare `ZDT_APP_ADMIN_PASSWORD`, se presente, come password dell'admin di partenza (utente `ZDT_APP_EMAIL`), non stamparla mai, e confermarlo nell'ultima riga JSON con `"admin_password": "applied"`. Senza la conferma la console non mostra nessuna password, perché potrebbe essere sbagliata.
 
-In console, sotto il portale, **Accesso iniziale** (a scomparsa, solo amministratori; ogni visualizzazione viene registrata) mostra indirizzo, utente e password con *Mostra*, *Copia password* e *Copia messaggio per il cliente*.
+In console il pulsante **🔑 Accesso iniziale** del portale (solo amministratori; ogni visualizzazione viene registrata) mostra indirizzo, utente e password con *Mostra*, *Copia password* e *Copia messaggio per il cliente*. Quando il proprietario è entrato si preme **Accesso fatto**: la password sparisce dalla console e il pulsante diventa **🔑 Recupera password**.
 
-**Genera una nuova password** (stesso pannello, anche dal pulsante 🔑 Accesso nelle liste) serve quando la console non conosce la password: portale creato prima di questo contratto, `create_app` che ha scelto la sua, o cliente che l'ha persa. La console genera una password nuova e mette in coda l'hook `set_admin_password` con `ZDT_APP_NAME`, `ZDT_APP_DOMAIN`, `ZDT_APP_EMAIL` e `ZDT_APP_ADMIN_PASSWORD`. Contratto: impostare quella password all'utente admin della squadra (e solo a lui), non stamparla mai, e confermarlo nell'ultima riga JSON con `{"admin_password": "applied"}`. Senza la conferma la console mostra l'errore e non la password.
+**Recupera password** serve quando la console non conosce la password (portale creato prima di questo contratto, `create_app` che ha scelto la sua) o il proprietario l'ha persa. La console genera una password nuova e mette in coda l'hook `set_admin_password` con `ZDT_APP_NAME`, `ZDT_APP_DOMAIN`, `ZDT_APP_EMAIL` e `ZDT_APP_ADMIN_PASSWORD`; la finestra si aggiorna da sola e la mostra appena il server l'ha applicata, con un messaggio di recupero per il cliente. Contratto: impostare quella password all'utente admin della squadra (e solo a lui), non stamparla mai, e confermarlo nell'ultima riga JSON con `{"admin_password": "applied"}`. Senza la conferma la console mostra l'errore e non la password.
 
 #### Aggiornamenti dei gestionali
 

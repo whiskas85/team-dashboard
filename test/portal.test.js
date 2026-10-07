@@ -192,3 +192,32 @@ test('our own gestionale becomes the hosted squad "zerodark" (3.29.0)', async ()
   // updates and password reset work as for any squad
   assert.equal((await call('GET', `/api/apps/${own.id}/updates`)).body.name, 'zerodark');
 });
+
+test('portal owner and first access handed over', async () => {
+  const srv = (await call('POST', '/api/servers', { name: 'owner-host' })).body;
+  const auth = { authorization: `Bearer ${srv.token}` };
+  const base = { type: 'portal', name: 'bianchi', email: 'mario@bianchi.it', owner_first_name: 'Mario', owner_last_name: 'Bianchi', owner_birth_date: '1980-05-17', owner_phone: '+39 333 1234567' };
+  assert.match((await call('POST', `/api/servers/${srv.id}/apps`, { ...base, owner_phone: 'abc' })).body.error, /telefono/);
+  assert.match((await call('POST', `/api/servers/${srv.id}/apps`, { ...base, owner_birth_date: '2999-01-01' })).body.error, /nascita/);
+  assert.equal((await call('POST', `/api/servers/${srv.id}/apps`, base)).status, 200);
+  const task = (await call('POST', '/api/agent/report', { agent_version: '0.1.5', samples: [] }, auth)).body.tasks[0];
+  assert.deepEqual([task.payload.first_name, task.payload.last_name, task.payload.birth_date, task.payload.phone], ['Mario', 'Bianchi', '1980-05-17', '+39 333 1234567']);
+  await call('POST', `/api/agent/tasks/${task.id}`, { status: 'done', app: { kind: 'docker', match: '^zd-sq-bianchi-', admin_password: 'applied' } }, auth);
+  let app = (await call('GET', `/api/servers/${srv.id}`)).body.apps.find((a) => a.name === 'bianchi');
+  assert.deepEqual([app.owner_first_name, app.owner_last_name, app.owner_email], ['Mario', 'Bianchi', 'mario@bianchi.it']);
+  assert.equal((await call('PATCH', `/api/apps/${app.id}`, { owner_phone: '+39 06 123456' })).status, 200);
+  assert.equal((await call('GET', `/api/servers/${srv.id}`)).body.apps.find((a) => a.name === 'bianchi').owner_first_name, 'Mario', 'untouched fields kept');
+
+  // first access: shown until the owner got in, then hidden; a recovery makes a new one
+  const first = (await call('GET', `/api/apps/${app.id}/credentials`)).body;
+  assert.ok(first.password);
+  assert.equal(first.reason, 'initial');
+  assert.equal((await call('POST', `/api/apps/${app.id}/credentials/delivered`)).body.ok, true);
+  const after = (await call('GET', `/api/apps/${app.id}/credentials`)).body;
+  assert.deepEqual([after.status, after.password, !!after.delivered_at], ['applied', undefined, true]);
+  await call('POST', `/api/apps/${app.id}/credentials/reset`);
+  const reset = (await call('POST', '/api/agent/report', { samples: [] }, auth)).body.tasks.find((t) => t.action === 'set_admin_password');
+  await call('POST', `/api/agent/tasks/${reset.id}`, { status: 'done', app: { admin_password: 'applied' } }, auth);
+  const rec = (await call('GET', `/api/apps/${app.id}/credentials`)).body;
+  assert.deepEqual([rec.reason, rec.password, rec.delivered_at], ['recovery', reset.payload.admin_password, null]);
+});
