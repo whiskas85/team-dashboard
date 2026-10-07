@@ -52,6 +52,9 @@ npm test
    - **Plesk o altro** → console su `127.0.0.1:8088` e istruzioni per il proxy.
 
    Variabili opzionali: `DOMAIN`, `CONSOLE_PORT`, `EMAIL` (per Let's Encrypt).
+
+   Su zerodarkserver la console sta dietro il Caddy del gestionale (`zd-proxy`, rete `gestionale_default`, `PROXY_NETWORK` nel `.env`).
+   Il suo sito è in **`/opt/gestionale/siti/locale.caddy`**, non nel Caddyfile del gestionale: se va cambiato, si cambia lì (poi `zd restart proxy`).
 3. **Deploy automatico (opzionale)**: il workflow `.github/workflows/deploy.yml` esegue i test e, a ogni push su `main`,
    sincronizza il codice via SSH e rilancia `setup.sh`, se sono presenti i secret `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY` (opz. `DEPLOY_PATH`, default `/opt/zerodark-console`).
 
@@ -159,7 +162,13 @@ Ogni squadra ha la sua versione del gestionale. Il lavoro rischioso lo fa il ser
 - **Aggiornamento automatico** (per portale): ogni notte alle `UPDATE_HOUR` alla versione più recente. Una versione che è già tornata indietro non viene ritentata da sola.
 - Un aggiornamento alla volta per server. Storico per portale, con l'output dello script quando non riesce.
 
-Solo i gestionali delle squadre (`zd-sq-*`): produzione e test seguono il loro rilascio.
+Solo i gestionali delle squadre (`zd-sq-*`); gli ambienti di test seguono il loro rilascio.
+
+#### Il nostro gestionale: «zerodark»
+
+Dal gestionale 3.29.0 anche `ops.zerodarkteam.it` è una squadra ospitata, **`zerodark`** (container `zd-sq-zerodark-*`), con gli stessi hook (versioni, aggiornamenti, password). Il database di tutte le squadre sta nel Postgres comune `zd-sq-pg`, monitorato come servizio **postgres-squadre**. All'avvio la console crea da sola l'app `zerodark` sul server dove girava la vecchia produzione (`zd-app`/`zd-db`) e sposta quella vecchia nell'Archivio come *non monitorata*.
+
+`zerodark` è segnata **Produzione** e dalla console non si archivia né si elimina: anche gli script del server lo rifiutano senza `FORZA=1`. Il nome è riservato (`OWN_SQUAD`, dominio `OWN_DOMAIN`, default `ops.<PORTAL_DOMAIN>`).
 
 #### Rimozione, archivio ed eliminazione definitiva
 

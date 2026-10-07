@@ -134,6 +134,32 @@ function markSquadPortals(db) {
              AND name GLOB '[a-z0-9]*' AND name NOT GLOB '*[^a-z0-9-]*'`);
 }
 
+// From gestionale 3.29.0 our own gestionale (ops.zerodarkteam.it) is a hosted squad like the others,
+// "zerodark" (containers zd-sq-zerodark-*), and every squad's database lives in the shared Postgres
+// zd-sq-pg. The old production app (zd-app/zd-db, often declared in the agent's local config) is
+// kept but no longer monitored, so its history stays reachable from the Archive.
+function adoptOwnSquad(db, { name = 'zerodark', domain = 'ops.zerodarkteam.it', now = Math.floor(Date.now() / 1000) } = {}) {
+  const match = `^zd-sq-${name}-`;
+  const old = db
+    .prepare("SELECT * FROM apps WHERE domain = ? AND name != ? AND (match IS NULL OR match NOT LIKE '^zd-sq-%') AND status NOT IN ('archived', 'purging', 'unmonitored')")
+    .all(domain, name);
+  for (const o of old) {
+    if (!db.prepare('SELECT 1 FROM apps WHERE server_id = ? AND name = ?').get(o.server_id, name)) {
+      db.prepare("INSERT INTO apps (server_id, name, type, kind, match, domain, status, provisioned, created_at) VALUES (?, ?, 'portal', 'docker', ?, ?, 'active', 1, ?)")
+        .run(o.server_id, name, match, domain, now);
+    }
+    db.prepare("UPDATE apps SET status = 'unmonitored', archived_at = ?, archived_by = 'console', status_msg = ? WHERE id = ?")
+      .run(now, `Sostituita da «${name}»: dal gestionale 3.29.0 la produzione è un gestionale ospitato (zd-sq-${name}-*)`, o.id);
+  }
+  // The shared Postgres of the squads, wherever squads run
+  const servers = db.prepare("SELECT DISTINCT server_id FROM apps WHERE match LIKE '^zd-sq-%' AND status NOT IN ('archived', 'purging')").all();
+  for (const { server_id: sid } of servers) {
+    if (db.prepare("SELECT 1 FROM apps WHERE server_id = ? AND (match = '^zd-sq-pg$' OR name = 'postgres-squadre')").get(sid)) continue;
+    db.prepare("INSERT INTO apps (server_id, name, type, kind, match, status, created_at) VALUES (?, 'postgres-squadre', 'service', 'docker', '^zd-sq-pg$', 'active', ?)").run(sid, now);
+  }
+  return old.length;
+}
+
 // Rolling window: everything older than `days` is dropped, so the DB never grows past the window.
 function purge(db, days, now = Date.now()) {
   const cutoff = Math.floor(now / 1000) - Math.round(days * 86400);
@@ -155,4 +181,4 @@ function tx(db, fn) {
   }
 }
 
-module.exports = { open, purge, tx, markSquadPortals };
+module.exports = { open, purge, tx, markSquadPortals, adoptOwnSquad };
