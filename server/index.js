@@ -6,7 +6,7 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { open, purge, tx, markSquadPortals } = require('./db');
+const { open, purge, tx, markSquadPortals, adoptOwnSquad } = require('./db');
 const { analyze } = require('./analytics');
 const { Users, ROLES, sessionCookie, sessionUser, publicUser } = require('./auth');
 const { probe, fetchVersion } = require('./health');
@@ -45,9 +45,13 @@ const cfg = {
   timeZone: process.env.TIME_ZONE || 'Europe/Rome',
   versionsInterval: Number(process.env.VERSIONS_INTERVAL || 3600),
   releasesUrl: process.env.RELEASES_URL || 'https://github.com/whiskas85/team-management/releases/tag/v',
+  // Our own gestionale, hosted as a squad since 3.29.0: never archived from the console.
+  ownSquad: process.env.OWN_SQUAD || 'zerodark',
 };
+cfg.ownDomain = process.env.OWN_DOMAIN || `ops.${cfg.portalDomain}`;
 
 const db = open(cfg.dbFile);
+adoptOwnSquad(db, { name: cfg.ownSquad, domain: cfg.ownDomain });
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const AGENT_DIR = path.join(__dirname, '..', 'agent');
 
@@ -205,7 +209,7 @@ const NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$/;
 // Portal names become a subdomain and container names (zd-sq-<name>-*): lowercase DNS label.
 const PORTAL_NAME_RE = /^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$/;
 // Same rule as the gestionale's squadra-server.sh: production, test instances and www are off limits.
-const RESERVED_PORTAL_RE = /^(ops|www|test.*)$/;
+const RESERVED_PORTAL_RE = /^(ops|www|zd|gestionale|test.*)$/;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const DOMAIN_RE = /^(?=.{1,253}$)([a-zA-Z0-9-]{1,63}\.)+[a-zA-Z]{2,63}$/;
 function str(v, max = 200) {
@@ -279,7 +283,7 @@ function decorateApps(apps) {
     const credError = cred && cred.status === 'failed'
       ? db.prepare("SELECT message FROM tasks WHERE app_id = ? AND action = 'set_admin_password' ORDER BY id DESC LIMIT 1").get(a.id)?.message
       : undefined;
-    return { ...a, latest: last || null, last24h: day, credentials: cred && { status: cred.status, username: cred.username, revealed_at: cred.revealed_at, revealed_by: cred.revealed_by, error: credError }, update: updates.decorate(a, serverOf(a.server_id)) };
+    return { ...a, latest: last || null, last24h: day, credentials: cred && { status: cred.status, username: cred.username, revealed_at: cred.revealed_at, revealed_by: cred.revealed_by, error: credError }, update: updates.decorate(a, serverOf(a.server_id)), own: a.name === cfg.ownSquad && !!a.provisioned };
   });
 }
 
@@ -637,7 +641,7 @@ route('POST', '/api/servers/:id/apps', async (req, p) => {
   if (!name || !NAME_RE.test(name)) throw new HttpError(400, 'Nome app non valido (lettere, numeri, . _ -)');
   if (type === 'portal') {
     if (!PORTAL_NAME_RE.test(name)) throw new HttpError(400, 'Nome portale non valido: solo minuscole, numeri e trattini (max 40), diventa il sottodominio');
-    if (RESERVED_PORTAL_RE.test(name)) throw new HttpError(400, `"${name}" è un nome riservato (ops, test*, www): scegline un altro, per una prova usa "demo"`);
+    if (RESERVED_PORTAL_RE.test(name) || name === cfg.ownSquad) throw new HttpError(400, `"${name}" è un nome riservato (ops, ${cfg.ownSquad}, test*, www): scegline un altro, per una prova usa "demo"`);
   }
   let domain = str(body.domain, 253);
   if (domain) domain = domain.toLowerCase();
@@ -685,6 +689,7 @@ route('DELETE', '/api/apps/:id', (req, p, q) => {
   if (q.get('deprovision') === '1') {
     // Only what the console created: never run remove_app on production or on apps found by the agent.
     if (!app.provisioned) throw new HttpError(400, `"${app.name}" non è stata creata dalla console: si può solo smettere di monitorarla`);
+    if (app.name === cfg.ownSquad) throw new HttpError(400, `"${app.name}" è il nostro gestionale di produzione (${cfg.ownDomain}): dalla console non si archivia`);
     if (q.get('confirm') !== app.name) throw new HttpError(400, `Per confermare scrivi il nome esatto: ${app.name}`);
     const t = now();
     tx(db, () => {
@@ -728,6 +733,7 @@ route('POST', '/api/apps/:id/purge', async (req, p) => {
   if (!['archived', 'unmonitored'].includes(app.status)) throw new HttpError(400, "Si può eliminare definitivamente solo un'app nell'archivio");
   const body = await readBody(req);
   if (body.confirm !== app.name) throw new HttpError(400, `Per confermare scrivi il nome esatto: ${app.name}`);
+  if (app.name === cfg.ownSquad && app.provisioned && app.status === 'archived') throw new HttpError(400, `"${app.name}" è il nostro gestionale di produzione: si elimina solo dal server, con FORZA=1`);
   if (!app.provisioned || app.status === 'unmonitored') {
     // never created by the console: nothing to delete on the server, just forget it
     db.prepare('DELETE FROM apps WHERE id = ?').run(app.id);

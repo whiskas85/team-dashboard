@@ -162,3 +162,33 @@ test('portal creation contract', async () => {
   const shown = (await call('GET', `/api/apps/${verdi.id}/credentials`)).body;
   assert.deepEqual([shown.status, shown.password, shown.login_url], ['applied', reset.payload.admin_password, 'https://verdi.zerodarkteam.it/login']);
 });
+
+test('our own gestionale becomes the hosted squad "zerodark" (3.29.0)', async () => {
+  const { adoptOwnSquad } = require('../server/db');
+  const srv = (await call('POST', '/api/servers', { name: 'prod-host' })).body;
+  const auth = { authorization: `Bearer ${srv.token}` };
+  // the old production app, declared in the agent's local config
+  await call('POST', '/api/agent/report', { samples: [{ system: { cpu_pct: 1 }, apps: [{ name: 'gestionale', kind: 'docker', match: '^zd-(app|db)$', cpu_pct: 1, mem_mb: 100 }] }] }, auth);
+  const old = (await call('GET', `/api/servers/${srv.id}`)).body.apps.find((a) => a.name === 'gestionale');
+  await call('PATCH', `/api/apps/${old.id}`, { type: 'portal', domain: 'ops.zerodarkteam.it' });
+
+  assert.equal(adoptOwnSquad(db), 1);
+  assert.equal(adoptOwnSquad(db), 0, 'idempotent');
+  const apps = (await call('GET', `/api/servers/${srv.id}`)).body.apps;
+  const own = apps.find((a) => a.name === 'zerodark');
+  assert.deepEqual([own.type, own.kind, own.match, own.domain, own.provisioned, own.own], ['portal', 'docker', '^zd-sq-zerodark-', 'ops.zerodarkteam.it', 1, true]);
+  assert.ok(!apps.some((a) => a.name === 'gestionale'), 'old app no longer monitored');
+  assert.ok((await call('GET', '/api/apps?view=archive')).body.some((a) => a.name === 'gestionale' && a.status === 'unmonitored'));
+  assert.equal(apps.find((a) => a.name === 'postgres-squadre').match, '^zd-sq-pg$', 'shared Postgres monitored');
+  // agent tells the console what to watch
+  const watched = (await call('POST', '/api/agent/report', { samples: [] }, auth)).body.apps.map((a) => a.match);
+  assert.ok(watched.includes('^zd-sq-zerodark-') && watched.includes('^zd-sq-pg$'));
+
+  // never archived from the console; a new portal cannot take the name
+  const del = await call('DELETE', `/api/apps/${own.id}?deprovision=1&confirm=zerodark`);
+  assert.equal(del.status, 400);
+  assert.match(del.body.error, /produzione/);
+  assert.match((await call('POST', `/api/servers/${srv.id}/apps`, { type: 'portal', name: 'zerodark' })).body.error, /riservato/);
+  // updates and password reset work as for any squad
+  assert.equal((await call('GET', `/api/apps/${own.id}/updates`)).body.name, 'zerodark');
+});

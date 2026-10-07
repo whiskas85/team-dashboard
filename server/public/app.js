@@ -761,7 +761,7 @@ async function renderPortals() {
       <div class="card table-wrap desktop-only"><table>
         <thead><tr><th>Portale</th><th>Server</th><th>Stato</th><th>Versione</th><th>Aggiornamento</th><th>Sito</th><th class="r">CPU · RAM ora</th><th></th></tr></thead>
         <tbody>${apps.map((a) => `<tr class="clickable" data-goto-server="${a.server_id}">
-          <td><b>${esc(a.name)}</b><div>${domainLink(a)}</div></td>
+          <td><b>${esc(a.name)}</b>${a.own ? ` ${badge('info', 'Produzione')}` : ''}<div>${domainLink(a)}</div></td>
           <td>${esc(a.server_name)}</td>
           <td>${badge(a.status)}</td>
           <td>${versionInfo(a) || '<span class="muted">–</span>'}</td>
@@ -863,7 +863,7 @@ async function renderArchive() {
 // ---------------------------------------------------------------------------
 function removeAppModal(app, onDone) {
   if (!app) return;
-  const canArchive = !!app.provisioned;
+  const canArchive = !!app.provisioned && !app.own;
   modal(`
     <h2>Rimuovi ${esc(app.name)}</h2>
     ${canArchive ? `
@@ -873,7 +873,7 @@ function removeAppModal(app, onDone) {
       <div class="field"><label for="cf">Per confermare scrivi <b>${esc(app.name)}</b></label><input id="cf" autocomplete="off"></div>
       <button class="primary danger-btn" id="arch" disabled>Archivia ${esc(app.name)}</button>
     </div>` : `
-    <p class="ink2">Quest'app non è stata creata dalla console: dalla console si può solo smettere di monitorarla, il server non viene toccato.${app.type === 'portal' ? '' : ''}</p>`}
+    <p class="ink2">${app.own ? `<b>${esc(app.name)}</b> è il nostro gestionale di produzione (${esc(app.domain || '')}): dalla console non si archivia. Gli script del server lo rifiutano comunque, se non lo si chiede apposta con <code>FORZA=1</code>.` : 'Quest\'app non è stata creata dalla console: dalla console si può solo smettere di monitorarla, il server non viene toccato.'}</p>`}
     <div class="choice">
       <h3>Smetti solo di monitorare</h3>
       <p class="ink2">L'app resta accesa sul server: la console smette di seguirla e la sposta nell'<b>Archivio</b>, da dove puoi <b>ricollegarla</b> quando vuoi.</p>
