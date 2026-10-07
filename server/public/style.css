@@ -222,7 +222,7 @@ pre.copy { background: var(--page); border: 1px solid var(--border); border-radi
 }
 
 /* Account */
-.user-chip { display: inline-flex; align-items: center; gap: 8px; padding: 4px 10px 4px 4px; border-radius: 999px; color: var(--ink-2); font-size: 13px; }
+.user-chip { display: inline-flex; align-items: center; gap: 8px; padding: 4px 4px 4px 12px; cursor: pointer; list-style: none; border-radius: 999px; color: var(--ink-2); font-size: 13px; }
 .user-chip:hover, .user-chip.active { background: var(--surface-2); color: var(--ink); text-decoration: none; }
 .user-chip .avatar { width: 24px; height: 24px; border-radius: 50%; background: var(--accent); color: var(--accent-ink); display: grid; place-items: center; font-size: 12px; font-weight: 600; }
 .status-msg { font-size: 13px; }
@@ -279,3 +279,14 @@ button.danger-btn:disabled { opacity: 0.45; }
 .actions button { white-space: nowrap; }
 .badge-btn { background: none; border: 0; padding: 0; cursor: pointer; font: inherit; }
 .badge-btn:hover .badge { filter: brightness(1.1); text-decoration: underline; }
+
+/* User menu: name + avatar, account / theme / logout in a drop-down card */
+.user-menu { position: relative; }
+.user-menu > summary::-webkit-details-marker { display: none; }
+.user-menu[open] > summary { background: var(--surface-2); color: var(--ink); }
+.menu-card { position: absolute; right: 0; top: calc(100% + 8px); z-index: 50; min-width: 220px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow); padding: 6px; display: grid; }
+.menu-card .menu-head { display: grid; padding: 8px 10px 10px; border-bottom: 1px solid var(--border); margin-bottom: 4px; font-size: 13px; }
+.menu-card a, .menu-card button { display: block; width: 100%; text-align: left; background: none; border: 0; border-radius: 8px; padding: 8px 10px; font: inherit; font-size: 13.5px; color: var(--ink); cursor: pointer; }
+.menu-card a:hover, .menu-card button:hover { background: var(--surface-2); text-decoration: none; }
+.menu-card .danger-item { color: var(--crit-ink); }
+.modal .inline-fields { margin-bottom: 14px; align-items: flex-start; }

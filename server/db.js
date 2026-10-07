@@ -106,6 +106,12 @@ const MIGRATIONS = [
   ['servers', 'versions_at', 'INTEGER'],
   ['servers', 'versions_error', 'TEXT'],
   ['tasks', 'result', 'TEXT'],         // JSON of the hook's last output line
+  // the person the portal is for (its first admin), asked when the portal is created
+  ['apps', 'owner_first_name', 'TEXT'],
+  ['apps', 'owner_last_name', 'TEXT'],
+  ['apps', 'owner_birth_date', 'TEXT'], // YYYY-MM-DD
+  ['apps', 'owner_phone', 'TEXT'],
+  ['apps', 'owner_email', 'TEXT'],
 ];
 
 function open(file) {

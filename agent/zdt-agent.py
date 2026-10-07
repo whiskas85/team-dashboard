@@ -32,7 +32,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.1.4"
+VERSION = "0.1.5"
 CONFIG_PATH = os.environ.get("ZDT_CONFIG", "/etc/zdt-agent/config.json")
 STATE_DIR = os.environ.get("ZDT_STATE_DIR", "/var/lib/zdt-agent")
 CLK_TCK = os.sysconf("SC_CLK_TCK")
@@ -455,7 +455,8 @@ class Agent:
             result["message"] = "Hook %s non installato o non eseguibile: vedi agent/hooks/ nel repository." % hook
         else:
             env = dict(os.environ)
-            for k in ("name", "type", "kind", "match", "domain", "port", "template", "email", "admin_password", "archive_path", "version"):
+            for k in ("name", "type", "kind", "match", "domain", "port", "template", "email", "admin_password", "archive_path", "version",
+                      "first_name", "last_name", "birth_date", "phone"):
                 env["ZDT_APP_" + k.upper()] = "" if p.get(k) is None else str(p.get(k))
             try:
                 r = subprocess.run([hook], input=json.dumps(p), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

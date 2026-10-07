@@ -78,12 +78,22 @@ function shell(active, content) {
         ${isAdmin() ? `<a href="#/users" class="${active === 'users' ? 'active' : ''}">Utenti</a>` : ''}
       </nav>
       <div class="spacer"></div>
-      <a class="user-chip ${active === 'account' ? 'active' : ''}" href="#/account" title="Il mio account"><span class="avatar" aria-hidden="true">${esc((state.me.user?.username || '?')[0].toUpperCase())}</span><span class="uname">${esc(state.me.user?.username || '')}</span></a>
-      <button class="small" id="theme" title="Tema chiaro/scuro" aria-label="Cambia tema">◐</button>
-      <button class="small" id="logout">Esci</button>
+      <details class="user-menu" id="user-menu">
+        <summary class="user-chip ${active === 'account' ? 'active' : ''}" title="Il mio account"><span class="uname">${esc(state.me.user?.username || '')}</span><span class="avatar" aria-hidden="true">${esc((state.me.user?.username || '?')[0].toUpperCase())}</span></summary>
+        <div class="menu-card" role="menu">
+          <div class="menu-head"><b>${esc(state.me.user?.username || '')}</b><span class="muted">${esc(ROLE_LABEL[state.me.user?.role] || state.me.user?.role || '')}</span></div>
+          <a href="#/account" role="menuitem">Il mio account</a>
+          <button type="button" id="theme" role="menuitem">◐ Tema chiaro / scuro</button>
+          <button type="button" id="logout" role="menuitem" class="danger-item">Esci</button>
+        </div>
+      </details>
     </header>
     <main id="main">${content}</main>`;
   document.body.classList.toggle('role-viewer', !isAdmin());
+  const menu = document.getElementById('user-menu');
+  menu.querySelectorAll('a').forEach((a) => a.addEventListener('click', () => (menu.open = false)));
+  document.onclick = (e) => { if (menu.open && !menu.contains(e.target)) menu.open = false; };
+  document.onkeydown = (e) => { if (e.key === 'Escape' && menu.open) menu.open = false; };
   document.getElementById('logout').onclick = async () => {
     await api('/api/logout', { method: 'POST' }).catch(() => {});
     state.me = { authenticated: false };
@@ -363,8 +373,7 @@ async function renderServer(id) {
       try { await api(`/api/apps/${b.dataset.health}/health`, { method: 'POST' }); } catch (e) { alert(e.message); }
       load();
     }));
-    main.querySelectorAll('details[data-cred]').forEach((d) => d.addEventListener('toggle', () => d.open && loadCredentials(d)));
-    wireCredentialReset(main, load);
+    main.querySelectorAll('[data-cred-open]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); credentialsModal(s.apps.find((a) => a.id === Number(b.dataset.credOpen)), load); }));
     main.querySelectorAll('[data-update-app]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); updateModal(s.apps.find((a) => a.id === Number(b.dataset.updateApp)), load); }));
     main.querySelectorAll('[data-edit-app]').forEach((b) => (b.onclick = () => editAppModal(s.apps.find((a) => a.id === Number(b.dataset.editApp)), load)));
     main.querySelectorAll('[data-del-app]').forEach((b) => (b.onclick = () => removeAppModal(s.apps.find((a) => a.id === Number(b.dataset.delApp)), load)));
@@ -391,8 +400,8 @@ function appsTable(apps) {
       <td class="r">${a.last24h.cpu_avg == null ? '–' : fmt.cores(a.last24h.cpu_avg / 100)}</td>
       <td class="r">${fmt.mb(a.last24h.mem_max)}</td>
       <td>${a.domain ? (a.type === 'portal' ? `<a href="https://${esc(a.domain)}" target="_blank" rel="noopener">${esc(a.domain)}</a>` : esc(a.domain)) : '<span class="muted">–</span>'}${a.port ? `<span class="muted">:${a.port}</span>` : ''}${healthBadge(a)}</td>
-      <td class="r"><div class="row" style="justify-content:flex-end;flex-wrap:nowrap">${a.update && a.status === 'active' ? `<button class="small admin-only${a.update.behind && !a.update.running ? ' primary' : ''}" data-update-app="${a.id}">Aggiorna</button>` : ''}<button class="small admin-only" data-edit-app="${a.id}" aria-label="Modifica ${esc(a.name)}">Modifica</button><button class="small danger admin-only" data-del-app="${a.id}" aria-label="Rimuovi ${esc(a.name)}">Rimuovi</button></div></td>
-    </tr>${credentialsRow(a)}`).join('')}</tbody></table></div>
+      <td class="r"><div class="row actions">${a.update && a.status === 'active' ? `<button class="small admin-only${a.update.behind && !a.update.running ? ' primary' : ''}" data-update-app="${a.id}">Aggiorna</button>` : ''}${accessButton(a)}<button class="small admin-only" data-edit-app="${a.id}" aria-label="Modifica ${esc(a.name)}">Modifica</button><button class="small danger admin-only" data-del-app="${a.id}" aria-label="Rimuovi ${esc(a.name)}">Rimuovi</button></div></td>
+    </tr>`).join('')}</tbody></table></div>
     <p class="muted" style="font-size:12px;margin:10px 0 0">CPU in core (1,00 = un core pieno). Clicca su un'app per vederne l'andamento.</p>`;
 }
 
@@ -433,75 +442,87 @@ function updateMode(a) {
     : b;
 }
 
-// First-access credentials of portals created by the console: collapsed, admins only, fetched on open.
+// Access of a squad's admin: the first-access password (until the owner got in), then only recovery.
 const isSquad = (a) => a.type === 'portal' && a.provisioned && a.status === 'active';
 const hasAccess = (a) => isAdmin() && !!(a.credentials || isSquad(a));
+const accessLabel = (a) => {
+  const c = a.credentials;
+  if (c && ['pending', 'resetting'].includes(c.status)) return '🔑 Password…';
+  if (c && c.status === 'applied' && !c.delivered_at) return '🔑 Accesso iniziale';
+  return '🔑 Recupera password';
+};
+const accessButton = (a) => (hasAccess(a) ? `<button class="small admin-only" data-cred-open="${a.id}" title="Password dell'amministratore del portale">${accessLabel(a)}</button>` : '');
 
-function credentialsBody(a) {
-  const squad = isSquad(a);
-  const c = a.credentials || { status: 'none' };
-  const renew = (label) => squad ? `<div class="row" style="margin-top:8px"><button type="button" class="small primary" data-cred-reset="${a.id}">${label}</button></div>` : '';
-  let body;
-  if (c.status === 'pending') body = '<p class="muted">Il portale è in creazione: la password sarà disponibile quando lo script avrà finito.</p>';
-  else if (c.status === 'resetting') body = '<p class="muted">Nuova password in preparazione: il server la imposta entro un paio di minuti. Questa pagina si aggiorna da sola.</p>';
-  else if (c.status === 'none') body = `<p class="muted">La console non conosce la password di questo portale.</p>${renew('Genera una nuova password')}`;
-  else if (c.status === 'unsupported') body = `<p class="muted">Lo script del gestionale ha scelto una sua password, quindi la console non la conosce. Generane una nuova: la imposta il server e la trovi qui, pronta da consegnare.</p>${renew('Genera una nuova password')}`;
-  else if (c.status === 'failed') body = `<p class="err">Il server non ha potuto impostare la nuova password${c.error ? `: ${esc(c.error)}` : ''}.</p><p class="muted">Resta valida la password precedente.${/non installato/i.test(c.error || '') ? ' Serve l\'hook <code>set_admin_password</code> del gestionale sul server.' : /manca la password/i.test(c.error || '') ? ' L\'agent sul server è di una versione che non passa la password agli script: reinstallalo dal dettaglio server con «Installa agent».' : ''}</p>${renew('Riprova')}`;
-  else body = `<div class="cred-body" data-cred-body><p class="muted">Caricamento…</p></div>${renew('Genera una nuova password')}`;
-  return body;
-}
+const failHint = (err) => (/non installato/i.test(err || '') ? ' Serve l\'hook <code>set_admin_password</code> del gestionale sul server.'
+  : /manca la password/i.test(err || '') ? ' L\'agent sul server non passa la password agli script: reinstallalo dal dettaglio server con «Installa agent».' : '');
 
-function credentialsRow(a) {
-  if (!hasAccess(a)) return '';
-  const c = a.credentials || { status: 'none' };
-  const body = credentialsBody(a);
-  const seen = c.revealed_at ? ` · vista da ${esc(c.revealed_by || '?')} ${ago(c.revealed_at)}` : '';
-  return `<tr class="cred-row"><td colspan="9"><details data-cred="${a.id}" data-cred-status="${esc(c.status)}"${c.status === 'resetting' ? ' open' : ''}>
-    <summary>🔑 Accesso iniziale<span class="muted" style="font-weight:400">${seen}</span></summary>${body}</details></td></tr>`;
-}
-
-// Asks the server to set a fresh first-access password chosen by the console.
-function wireCredentialReset(main, reload) {
-  main.querySelectorAll('[data-cred-reset]').forEach((b) => (b.onclick = async (e) => {
-    e.stopPropagation();
-    if (!confirm('Generare una nuova password per l\'amministratore del portale? Quella attuale smetterà di funzionare appena il server avrà applicato la nuova.')) return;
-    b.disabled = true;
-    b.textContent = 'Invio…';
-    try { await api(`/api/apps/${b.dataset.credReset}/credentials/reset`, { method: 'POST' }); } catch (err) { alert(err.message); }
-    reload();
-  }));
-}
-
-async function loadCredentials(details) {
-  const box = details.querySelector('[data-cred-body]');
-  if (!box || box.dataset.loaded) return;
-  try {
-    const c = await api(`/api/apps/${details.dataset.cred}/credentials`);
-    box.dataset.loaded = '1';
-    const user = c.username || 'admin';
-    const message = `Ciao,\nil tuo gestionale è pronto.\n\nIndirizzo: ${c.login_url}\nUtente: ${user}\nPassword: ${c.password}\n\nAl primo accesso cambia la password con una scelta da te.`;
-    box.innerHTML = `
-      <div class="cred-grid">
-        <span class="muted">Indirizzo</span><span><a href="${esc(c.login_url)}" target="_blank" rel="noopener">${esc(c.login_url)}</a></span>
-        <span class="muted">Utente</span><span class="mono">${esc(user)}</span>
-        <span class="muted">Password</span><span class="row" style="gap:8px"><code class="pw" data-pw>••••••••••••••••</code>
-          <button type="button" class="small" data-pw-toggle>Mostra</button><button type="button" class="small" data-copy="pw">Copia password</button></span>
-      </div>
-      <div class="row" style="margin-top:10px"><button type="button" class="small primary" data-copy="msg">Copia messaggio per il cliente</button>
-        <span class="muted" style="font-size:12px">Indirizzo, utente e password pronti da inviare. Consiglia di cambiarla al primo accesso.</span></div>`;
-    const pw = box.querySelector('[data-pw]');
-    box.querySelector('[data-pw-toggle]').onclick = (e) => {
-      const show = pw.textContent.startsWith('•');
-      pw.textContent = show ? c.password : '••••••••••••••••';
-      e.target.textContent = show ? 'Nascondi' : 'Mostra';
+function credentialsModal(app, reload) {
+  if (!app) return;
+  modal(`<h2>Accesso amministratore · ${esc(app.name)}</h2><div id="c-body"><p class="muted">Caricamento…</p></div>
+    <div class="modal-actions"><button type="button" data-close>Chiudi</button></div>`, (m, close) => {
+    const box = m.querySelector('#c-body');
+    let timer = null;
+    const stop = () => clearTimeout(timer);
+    const squad = isSquad(app);
+    const recoverBtn = (label = 'Recupera password', primary = true) => (squad ? `<button type="button" class="small${primary ? ' primary' : ''}" data-recover>${label}</button>` : '');
+    const draw = async () => {
+      stop();
+      if (!document.body.contains(box)) return;
+      let c;
+      try { c = await api(`/api/apps/${app.id}/credentials`); } catch { c = { status: 'none' }; }
+      const recovery = c.reason === 'recovery';
+      if (c.status === 'pending' || c.status === 'resetting') {
+        box.innerHTML = `<p>${badge('warning', c.status === 'pending' ? 'Portale in creazione' : 'Nuova password in preparazione')}</p><p class="muted">Il server la imposta entro un paio di minuti: questa finestra si aggiorna da sola.</p>`;
+        timer = setTimeout(draw, 4000);
+      } else if (c.status === 'failed') {
+        box.innerHTML = `<p class="err">Il server non ha potuto impostare la nuova password${c.error ? `: ${esc(c.error)}` : ''}.</p><p class="muted">Resta valida la password di prima.${failHint(c.error)}</p>${recoverBtn('Riprova')}`;
+      } else if (c.status === 'applied' && c.password) {
+        const user = c.username || 'admin';
+        const message = recovery
+          ? `Ciao,\nho reimpostato la password del tuo gestionale.\n\nIndirizzo: ${c.login_url}\nUtente: ${user}\nNuova password: ${c.password}\n\nAl primo accesso ti verrà chiesto di sceglierne una tua.`
+          : `Ciao,\nil tuo gestionale è pronto.\n\nIndirizzo: ${c.login_url}\nUtente: ${user}\nPassword: ${c.password}\n\nAl primo accesso ti verrà chiesto di sceglierne una tua.`;
+        box.innerHTML = `
+          <p class="muted" style="margin-top:0">${recovery ? 'Password di recupero' : 'Password del primo accesso'}, scelta dalla console${c.created_at ? ` il ${esc(fmt.dateTime(c.created_at))}` : ''}. Il proprietario la cambia al primo accesso.</p>
+          <div class="cred-grid">
+            <span class="muted">Indirizzo</span><span><a href="${esc(c.login_url)}" target="_blank" rel="noopener">${esc(c.login_url)}</a></span>
+            <span class="muted">Utente</span><span class="mono">${esc(user)}</span>
+            <span class="muted">Password</span><span class="row" style="gap:8px"><code class="pw" data-pw>••••••••••••••••</code>
+              <button type="button" class="small" data-pw-toggle>Mostra</button><button type="button" class="small" data-copy="pw">Copia password</button></span>
+          </div>
+          <div class="row" style="margin-top:12px"><button type="button" class="small primary" data-copy="msg">Copia messaggio per il cliente</button></div>
+          <div class="choice" style="margin-top:16px">
+            <p><b>Il proprietario è entrato?</b> Segna l'accesso come fatto: la password sparisce dalla console. Se poi la perde, si usa <b>Recupera password</b>.</p>
+            <div class="row"><button type="button" class="small" data-delivered>Accesso fatto</button></div>
+          </div>`;
+        const pw = box.querySelector('[data-pw]');
+        box.querySelector('[data-pw-toggle]').onclick = (e) => {
+          const show = pw.textContent.startsWith('•');
+          pw.textContent = show ? c.password : '••••••••••••••••';
+          e.target.textContent = show ? 'Nascondi' : 'Mostra';
+        };
+        box.querySelectorAll('[data-copy]').forEach((b) => (b.onclick = async () => {
+          try { await navigator.clipboard.writeText(b.dataset.copy === 'pw' ? c.password : message); b.textContent = 'Copiato ✓'; } catch { b.textContent = 'Copia non riuscita'; }
+        }));
+        box.querySelector('[data-delivered]').onclick = async () => {
+          try { await api(`/api/apps/${app.id}/credentials/delivered`, { method: 'POST' }); reload && reload(); draw(); } catch (err) { alert(err.message); }
+        };
+      } else if (c.status === 'applied') {
+        box.innerHTML = `<p>${badge('ok', 'Accesso fatto')} <span class="muted" style="font-size:13px">${c.delivered_at ? `${esc(fmt.dateTime(c.delivered_at))}${c.delivered_by ? ` · ${esc(c.delivered_by)}` : ''}` : ''}</span></p>
+          <p class="muted">Il proprietario ha la sua password e la console non la conosce più. Se l'ha persa, genera una password di recupero: la imposta il server, la trovi qui pronta da inviare e al primo accesso gli verrà chiesto di cambiarla.</p>${recoverBtn()}`;
+      } else {
+        const why = c.status === 'unsupported' ? 'Lo script del gestionale ha scelto una sua password: la console non la conosce.' : 'La console non conosce la password di questo portale.';
+        box.innerHTML = `<p class="muted">${why} Con <b>Recupera password</b> il server ne imposta una nuova, scelta dalla console, che trovi qui pronta da inviare.</p>${recoverBtn()}`;
+      }
+      const rb = box.querySelector('[data-recover]');
+      if (rb) rb.onclick = async () => {
+        if (!confirm('Generare una nuova password per l\'amministratore del portale? Quella attuale smetterà di funzionare appena il server avrà applicato la nuova.')) return;
+        rb.disabled = true;
+        try { await api(`/api/apps/${app.id}/credentials/reset`, { method: 'POST' }); reload && reload(); } catch (err) { alert(err.message); }
+        draw();
+      };
     };
-    box.querySelectorAll('[data-copy]').forEach((b) => (b.onclick = async () => {
-      const text = b.dataset.copy === 'pw' ? c.password : message;
-      try { await navigator.clipboard.writeText(text); b.textContent = 'Copiato ✓'; } catch { b.textContent = 'Copia non riuscita'; }
-    }));
-  } catch (e) {
-    box.innerHTML = `<p class="err">${esc(e.message)}</p>`;
-  }
+    draw();
+  });
 }
 
 async function showApp(app) {
@@ -514,6 +535,23 @@ async function showApp(app) {
   lineChart(document.getElementById('a-mem'), { from: d.from, to: d.to, ts, series: [{ name: 'RAM', values: d.rows.map((r) => r.mem_mb), color: C.s1 }], format: fmt.mb });
 }
 
+// Owner of a portal: first name, last name, date of birth, phone (prefix = id prefix of the inputs).
+function ownerFieldsHtml(o, px) {
+  return `<div class="inline-fields">
+      <div class="field" style="flex:1"><label for="${px}-ofn">Nome</label><input id="${px}-ofn" autocomplete="off" maxlength="60" value="${esc(o.owner_first_name || '')}"></div>
+      <div class="field" style="flex:1"><label for="${px}-oln">Cognome</label><input id="${px}-oln" autocomplete="off" maxlength="60" value="${esc(o.owner_last_name || '')}"></div>
+    </div>
+    <div class="inline-fields">
+      <div class="field" style="flex:1"><label for="${px}-obd">Data di nascita</label><input id="${px}-obd" type="date" max="${new Date().toISOString().slice(0, 10)}" value="${esc(o.owner_birth_date || '')}"></div>
+      <div class="field" style="flex:1"><label for="${px}-oph">Telefono</label><input id="${px}-oph" type="tel" autocomplete="off" placeholder="+39 333 1234567" value="${esc(o.owner_phone || '')}"></div>
+    </div>`;
+}
+function ownerValues(m, px) {
+  const v = (k) => m.querySelector(`#${px}-${k}`).value.trim() || null;
+  return { owner_first_name: v('ofn'), owner_last_name: v('oln'), owner_birth_date: v('obd'), owner_phone: v('oph') };
+}
+const ownerName = (a) => [a.owner_first_name, a.owner_last_name].filter(Boolean).join(' ');
+
 function editAppModal(app, onDone) {
   modal(`
     <h2>Modifica ${esc(app.name)}</h2>
@@ -521,14 +559,22 @@ function editAppModal(app, onDone) {
       <div class="field"><label for="et">Tipo</label><select id="et">${[['portal', 'Portale (gestionale)'], ['service', 'Servizio'], ['other', 'Altro']].map(([v, l]) => `<option value="${v}" ${app.type === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
       <div class="field"><label for="ed">Dominio</label><input id="ed" autocomplete="off" value="${esc(app.domain || '')}" placeholder="es. ops.zerodarkteam.it"><small>Per un portale: la console controlla che <code>https://&lt;dominio&gt;/login</code> risponda.</small></div>
       <div class="field"><label for="em2">Criterio di monitoraggio</label><input id="em2" autocomplete="off" value="${esc(app.match || '')}"><small>${app.kind === 'systemd' ? 'Unit systemd.' : `Espressione regolare sui nomi ${app.kind === 'docker' ? 'dei container' : 'dei processi'}.`} Se l'app è definita nella configurazione dell'agent, vale quella.</small></div>
+      <div class="owner-only" ${app.type === 'portal' ? '' : 'hidden'}>
+        <h3 style="margin:4px 0 8px;font-size:14px">Proprietario</h3>
+        ${ownerFieldsHtml(app, 'e')}
+        <div class="field"><label for="e-oem">Email</label><input id="e-oem" type="email" autocomplete="off" value="${esc(app.owner_email || app.credentials?.username || '')}"></div>
+      </div>
       <p class="muted" style="font-size:13px;margin:0">Cambia solo come la console mostra e controlla l'app: sul server non viene toccato nulla.</p>
       <div class="err" id="e"></div>
       <div class="modal-actions"><button type="button" data-close>Annulla</button><button class="primary">Salva</button></div>
     </form>`, (m, close) => {
+    m.querySelector('#et').onchange = () => (m.querySelector('.owner-only').hidden = m.querySelector('#et').value !== 'portal');
     m.querySelector('#f').onsubmit = async (e) => {
       e.preventDefault();
       try {
-        await api(`/api/apps/${app.id}`, { method: 'PATCH', body: { type: m.querySelector('#et').value, domain: m.querySelector('#ed').value.trim() || null, match: m.querySelector('#em2').value.trim() || null } });
+        const portal = m.querySelector('#et').value === 'portal';
+        await api(`/api/apps/${app.id}`, { method: 'PATCH', body: { type: m.querySelector('#et').value, domain: m.querySelector('#ed').value.trim() || null, match: m.querySelector('#em2').value.trim() || null,
+          ...(portal ? { ...ownerValues(m, 'e'), owner_email: m.querySelector('#e-oem').value.trim() || null } : {}) } });
         close();
         onDone();
       } catch (err) { m.querySelector('#e').textContent = err.message; }
@@ -545,8 +591,10 @@ function newAppModal(server, onDone) {
       <div class="field"><label for="n">Nome</label><input id="n" required autocomplete="off" placeholder="es. rossi"><small id="n-hint"></small></div>
       <div class="portal-only">
         <div class="field"><label for="d">Dominio</label><input id="d" autocomplete="off"><small>Vuoto = <code id="d-default"></code>. Se il DNS non punta ancora al server, il portale nasce lo stesso e il sito si attiva quando il record c'è.</small></div>
-        <div class="field"><label for="em">Email dell'amministratore</label><input id="em" type="email" autocomplete="off" placeholder="admin@cliente.it"><small>È l'utente con cui il nuovo proprietario entra la prima volta.</small></div>
-        <p class="muted" style="font-size:13px;margin:0 0 14px">Crea database, app e WhatsApp del gestionale con le immagini della produzione, partendo da un database vuoto. La password del primo accesso la genera la console: la trovi nella riga del portale, sotto <b>Accesso iniziale</b>, pronta da consegnare.</p>
+        <h3 style="margin:4px 0 8px;font-size:14px">Proprietario: il primo amministratore</h3>
+        ${ownerFieldsHtml({}, 'n')}
+        <div class="field"><label for="em">Email</label><input id="em" type="email" autocomplete="off" placeholder="mario.rossi@cliente.it"><small>È il suo utente per entrare.</small></div>
+        <p class="muted" style="font-size:13px;margin:0 0 14px">Crea database, app e WhatsApp del gestionale con le immagini della produzione, partendo da un database vuoto. La password del primo accesso la genera la console: la trovi con il pulsante <b>🔑 Accesso iniziale</b> del portale, pronta da consegnare.</p>
       </div>
       <div class="other-only" hidden>
         <div class="inline-fields" style="margin-bottom:14px">
@@ -585,9 +633,12 @@ function newAppModal(server, onDone) {
     $('#f').onsubmit = async (e) => {
       e.preventDefault();
       const portal = isPortal();
-      if (portal && !v('#em')) { $('#e').textContent = "Indica l'email dell'amministratore: sarà il suo utente."; return; }
+      if (portal) {
+        const missing = [['#n-ofn', 'il nome'], ['#n-oln', 'il cognome'], ['#n-obd', 'la data di nascita'], ['#n-oph', 'il telefono'], ['#em', "l'email"]].filter(([id]) => !v(id)).map(([, l]) => l);
+        if (missing.length) { $('#e').textContent = `Del proprietario manca ${missing.join(', ')}.`; return; }
+      }
       const body = portal
-        ? { type: 'portal', name: v('#n').toLowerCase(), domain: v('#d') || null, email: v('#em') || null, provision: $('#pv').checked }
+        ? { type: 'portal', name: v('#n').toLowerCase(), domain: v('#d') || null, email: v('#em') || null, provision: $('#pv').checked, ...ownerValues(m, 'n') }
         : { type: v('#t'), name: v('#n'), kind: v('#k'), port: v('#p') ? Number(v('#p')) : null, domain: v('#d2') || null, match: v('#mt') || null, provision: $('#pv').checked };
       try {
         await api(`/api/servers/${server.id}/apps`, { method: 'POST', body });
@@ -742,7 +793,7 @@ function wireAppActions(main, apps, reload) {
 
 const appActions = (a) => `<div class="row actions">
   ${a.update && a.status === 'active' ? `<button class="small admin-only${a.update.behind && !a.update.running ? ' primary' : ''}" data-update-app="${a.id}">Aggiorna</button>` : ''}
-  ${hasAccess(a) ? `<button class="small admin-only" data-cred-open="${a.id}">🔑 Accesso</button>` : ''}
+  ${accessButton(a)}
   <button class="small admin-only" data-edit-app="${a.id}">Modifica</button>
   <button class="small danger admin-only" data-del-app="${a.id}">Rimuovi</button></div>`;
 
@@ -761,7 +812,7 @@ async function renderPortals() {
       <div class="card table-wrap desktop-only"><table>
         <thead><tr><th>Portale</th><th>Server</th><th>Stato</th><th>Versione</th><th>Aggiornamento</th><th>Sito</th><th class="r">CPU · RAM ora</th><th></th></tr></thead>
         <tbody>${apps.map((a) => `<tr class="clickable" data-goto-server="${a.server_id}">
-          <td><b>${esc(a.name)}</b>${a.own ? ` ${badge('info', 'Produzione')}` : ''}<div>${domainLink(a)}</div></td>
+          <td><b>${esc(a.name)}</b>${a.own ? ` ${badge('info', 'Produzione')}` : ''}<div>${domainLink(a)}</div>${ownerName(a) ? `<div class="muted" style="font-size:12px" title="${esc([a.owner_phone, a.owner_email].filter(Boolean).join(' · '))}">${esc(ownerName(a))}</div>` : ''}</td>
           <td>${esc(a.server_name)}</td>
           <td>${badge(a.status)}</td>
           <td>${versionInfo(a) || '<span class="muted">–</span>'}</td>
@@ -994,15 +1045,6 @@ function updateModal(app, reload) {
   });
 }
 
-function credentialsModal(app, reload) {
-  if (!app) return;
-  modal(`<h2>Accesso iniziale · ${esc(app.name)}</h2>
-    <details data-cred="${app.id}" open style="border:0;padding:0"><summary hidden></summary>${credentialsBody(app)}</details>
-    <div class="modal-actions"><button type="button" data-close>Chiudi</button></div>`, (m, close) => {
-    loadCredentials(m.querySelector('details'));
-    wireCredentialReset(m, () => { close(); reload && reload(); });
-  });
-}
 
 // ---------------------------------------------------------------------------
 // Account & users

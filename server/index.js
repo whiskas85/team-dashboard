@@ -283,7 +283,7 @@ function decorateApps(apps) {
     const credError = cred && cred.status === 'failed'
       ? db.prepare("SELECT message FROM tasks WHERE app_id = ? AND action = 'set_admin_password' ORDER BY id DESC LIMIT 1").get(a.id)?.message
       : undefined;
-    return { ...a, latest: last || null, last24h: day, credentials: cred && { status: cred.status, username: cred.username, revealed_at: cred.revealed_at, revealed_by: cred.revealed_by, error: credError }, update: updates.decorate(a, serverOf(a.server_id)), own: a.name === cfg.ownSquad && !!a.provisioned };
+    return { ...a, latest: last || null, last24h: day, credentials: cred && { status: cred.status, username: cred.username, revealed_at: cred.revealed_at, revealed_by: cred.revealed_by, delivered_at: cred.delivered_at, error: credError }, update: updates.decorate(a, serverOf(a.server_id)), own: a.name === cfg.ownSquad && !!a.provisioned };
   });
 }
 
@@ -630,6 +630,27 @@ route('GET', '/api/servers/:id/metrics', (req, p, q) => {
   };
 });
 
+// Owner of a portal (its first admin): optional in the API, asked by the "Nuova app" form.
+const PHONE_RE = /^\+?[0-9][0-9 ./-]{5,19}$/;
+function ownerFields(body, prev = {}) {
+  const pick = (k, max) => (body[k] === undefined ? prev[k] ?? null : str(body[k], max));
+  const o = {
+    owner_first_name: pick('owner_first_name', 60),
+    owner_last_name: pick('owner_last_name', 60),
+    owner_birth_date: pick('owner_birth_date', 10),
+    owner_phone: pick('owner_phone', 20),
+    owner_email: pick('owner_email', 254),
+  };
+  if (o.owner_phone && !PHONE_RE.test(o.owner_phone)) throw new HttpError(400, 'Numero di telefono non valido (es. +39 333 1234567)');
+  if (o.owner_birth_date) {
+    const d = /^\d{4}-\d{2}-\d{2}$/.test(o.owner_birth_date) ? new Date(`${o.owner_birth_date}T00:00:00Z`) : null;
+    const age = d ? (Date.now() - d.getTime()) / (365.25 * 86400000) : -1;
+    if (!d || Number.isNaN(age) || d.toISOString().slice(0, 10) !== o.owner_birth_date || age < 0 || age > 120) throw new HttpError(400, 'Data di nascita non valida');
+  }
+  if (o.owner_email && !EMAIL_RE.test(o.owner_email)) throw new HttpError(400, 'Email non valida');
+  return o;
+}
+
 // Apps
 route('POST', '/api/servers/:id/apps', async (req, p) => {
   requireAdmin(req);
@@ -650,6 +671,7 @@ route('POST', '/api/servers/:id/apps', async (req, p) => {
   if (type === 'portal' && (domain === cfg.portalDomain || domain === `www.${cfg.portalDomain}`)) throw new HttpError(400, 'Dominio riservato');
   const email = str(body.email, 254);
   if (email && !EMAIL_RE.test(email)) throw new HttpError(400, 'Email non valida');
+  const owner = type === 'portal' ? ownerFields({ ...body, owner_email: body.owner_email ?? email }) : null;
   const port = num(body.port);
   if (port !== null && (port < 1 || port > 65535 || !Number.isInteger(port))) throw new HttpError(400, 'Porta non valida');
   const existing = db.prepare('SELECT status FROM apps WHERE server_id = ? AND name = ?').get(server.id, name);
@@ -670,11 +692,19 @@ route('POST', '/api/servers/:id/apps', async (req, p) => {
       // refused above): the console may archive it later through remove_app.
       .run(server.id, name, type, kind, match, domain, port, template, provision ? 'pending' : 'active', provision || type === 'portal' ? 1 : 0, t);
     const appId = Number(r.lastInsertRowid);
+    if (owner) {
+      db.prepare('UPDATE apps SET owner_first_name = ?, owner_last_name = ?, owner_birth_date = ?, owner_phone = ?, owner_email = ? WHERE id = ?')
+        .run(owner.owner_first_name, owner.owner_last_name, owner.owner_birth_date, owner.owner_phone, owner.owner_email, appId);
+    }
     // Portals: the console picks the first-access password and hands it to create_app.
     if (provision && type === 'portal') credentials.create(appId, email, t);
     if (provision) {
       db.prepare("INSERT INTO tasks (server_id, app_id, action, payload, status, created_at, updated_at) VALUES (?, ?, 'create_app', ?, 'queued', ?, ?)").run(
-        server.id, appId, JSON.stringify({ name, type, kind, match, domain, port, template, email }), t, t
+        server.id, appId, JSON.stringify({
+          name, type, kind, match, domain, port, template, email,
+          // ZDT_APP_FIRST_NAME, _LAST_NAME, _BIRTH_DATE, _PHONE: the first admin's profile
+          ...(owner ? { first_name: owner.owner_first_name, last_name: owner.owner_last_name, birth_date: owner.owner_birth_date, phone: owner.owner_phone } : {}),
+        }), t, t
       );
     }
     return appId;
@@ -768,7 +798,9 @@ route('PATCH', '/api/apps/:id', async (req, p) => {
     }
   }
   const changedDomain = domain !== app.domain;
-  db.prepare('UPDATE apps SET type = ?, domain = ?, match = ? WHERE id = ?').run(type, domain, match, app.id);
+  const owner = ownerFields(body, app);
+  db.prepare('UPDATE apps SET type = ?, domain = ?, match = ?, owner_first_name = ?, owner_last_name = ?, owner_birth_date = ?, owner_phone = ?, owner_email = ? WHERE id = ?')
+    .run(type, domain, match, owner.owner_first_name, owner.owner_last_name, owner.owner_birth_date, owner.owner_phone, owner.owner_email, app.id);
   markSquadPortals(db);
   if (changedDomain || type !== app.type) db.prepare('UPDATE apps SET health = NULL, health_code = NULL, health_error = NULL, health_at = NULL WHERE id = ?').run(app.id);
   invalidateAnalysis();
@@ -782,7 +814,14 @@ route('GET', '/api/apps/:id/credentials', (req, p) => {
   if (!app) throw new HttpError(404, 'App non trovata');
   const c = credentials.reveal(app.id, me.username, now());
   if (!c) throw new HttpError(404, 'Nessuna credenziale iniziale per questa app');
-  return { ...c, login_url: app.domain ? `https://${app.domain}/login` : null };
+  const error = c.status === 'failed' ? db.prepare("SELECT message FROM tasks WHERE app_id = ? AND action = 'set_admin_password' ORDER BY id DESC LIMIT 1").get(app.id)?.message : undefined;
+  return { ...c, error, login_url: app.domain ? `https://${app.domain}/login` : null };
+});
+// The owner has done the first access: the password is hidden for good (a recovery makes a new one).
+route('POST', '/api/apps/:id/credentials/delivered', (req, p) => {
+  const me = requireAdmin(req);
+  if (!credentials.markDelivered(Number(p.id), me.username, now())) throw new HttpError(400, 'Nessuna password da consegnare per questa app');
+  return { ok: true };
 });
 function agentAtLeast(version, min) {
   const a = String(version || '').split('.').map(Number);
